@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 import os
 import time 
 
-from src.optim import dOGR
 
 SEED = 42
 DATADIR = "DATA"

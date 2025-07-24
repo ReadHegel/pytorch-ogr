@@ -1,14 +1,14 @@
 print("In module products __package__, __name__ ==", __package__, __name__)
 from argparse import ArgumentParser
-import torch
 from torch import optim
-from typing import Union
 import lightning as L
 import lightning.pytorch.loggers as loggers
 from .nets import get_FC, get_LeNet
 from .trainloop import TestLightningModule, fit_and_test
 from .datamodule import MNISTDataModule
 from pathlib import Path
+
+from src.optim.dOGR import dOGR
 
 LOGGING_DIR = Path(__file__).parent.parent / "logs"
 
@@ -47,6 +47,10 @@ optimizer_dict = {
         "opt": optim.SGD,
         "args": {"lr": 1e-3},
     },
+    "dOGR": {
+        "opt": dOGR,
+        "args": {},
+    }
 }
 
 net_dict = {"FC": get_FC, "LeNet": get_LeNet}
