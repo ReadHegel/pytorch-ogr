@@ -17,6 +17,7 @@ class dOGR(Optimizer):
         params: ParamsT,
         lr: Union[float, Tensor] = 1e-3,
         beta: float = 0.99,
+        eps: float = 1e-4,
         maximize: bool = False,
     ):
         if isinstance(lr, Tensor) and lr.numel() != 1:
@@ -28,6 +29,7 @@ class dOGR(Optimizer):
             "lr": lr,
             "maximize": maximize,
             "beta": beta,
+            "eps": eps,
         }
 
         super().__init__(params, defaults)
@@ -37,6 +39,11 @@ class dOGR(Optimizer):
         group, 
         params, 
         grads,
+        mean_params: list[Tensor],
+        mean_grads: list[Tensor],
+        d_params_params: list[Tensor], 
+        d_grads_params: list[Tensor],
+        mean: list[Tensor],
     ):
         has_sparse_grad = False
         
@@ -47,6 +54,27 @@ class dOGR(Optimizer):
 
             if p.grad.is_sparse:
                 has_sparse_grad = True
+
+            state = self.state[p]
+            
+            # Lazy state initialization
+            if len(state) == 0:
+                def init_as_zero(name: str): 
+                    state[name] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
+
+                init_as_zero("mean_params")
+                init_as_zero("mean_grads")
+                init_as_zero("d_params_params")
+                init_as_zero("d_grads_params")
+                init_as_zero("mean")
+
+            mean_params.append(state["mean_params"])
+            mean_grads.append(state["mean_grads"])
+            d_params_params.append(state["d_params_params"])
+            d_grads_params.append(state["d_grads_params"])
+            mean.append(state["mean"])
 
         return has_sparse_grad
 
@@ -70,6 +98,12 @@ class dOGR(Optimizer):
                 grads,
                 lr=group["lr"],
                 beta=group["beta"],
+                eps=group["eps"],
+                mean_params=group["mean_params"],
+                mean_grads=group["mean_grads"],
+                d_params_params=group["d_params_params"], 
+                d_grads_params=group["d_grads_params"],
+                mean=group["mean"],
                 maximize=group["maximize"],
             )
 
@@ -81,10 +115,12 @@ def dogr(
     grads: list[Tensor],
     lr: float,
     beta: float,
+    eps: float,
     mean_params: list[Tensor],
     mean_grads: list[Tensor],
     d_params_params: list[Tensor], 
     d_grads_params: list[Tensor],
+    mean: list[Tensor],
     maximize: bool,
 ):
     for i, param in enumerate(params): 
@@ -100,7 +136,8 @@ def dogr(
         # mean_g = beta * g + (1 - beta) * g
         mean_grads[i] += beta * (grad - mean_grads[i])
         
-        # mean
+        # s = beta * s + 1
+        mean[i] += (beta - 1) * mean[i] + 1
 
         # d_theta_theta = (1 - beta) * theta_hat_mean**2 + beta * theta_hat**2
         d_params_params[i] += beta * (
@@ -112,11 +149,20 @@ def dogr(
             (grad - mean_grads[i]) * (param - mean_params[i]) - 
             d_grads_params[i]
         )
-
-        param.add_(
-
-        )
-
-        # simple SGD
-        param.add_(grad, alpha=-lr)
         
+        # Diagonal Hessian
+        H_inv = d_params_params[i] / \
+            (d_grads_params[i] + torch.sign(d_grads_params[i]) * eps) 
+
+        # Calculate p 
+        p = (
+            mean_params[i] - H_inv * mean_grads[i]
+        ) / (mean[i] + eps)
+
+        H_sign = torch.sign(H_inv)
+
+        # theta = theta + sing(H)(p - param)
+        param.add_(
+            H_sign * (p - param), 
+            alpha = lr 
+        )
