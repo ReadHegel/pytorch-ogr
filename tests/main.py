@@ -47,6 +47,10 @@ optimizer_dict = {
         "opt": optim.SGD,
         "args": {"lr": 1e-3},
     },
+    "ADAM": {
+        "opt": optim.Adam,
+        "args": {},
+    },
     "dOGR": {
         "opt": dOGR,
         "args": {},

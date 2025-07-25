@@ -3,7 +3,7 @@ This file contains implementation of the diagonal OGR function
 optimalization algorithm from paper: https://arxiv.org/pdf/1901.11457
 """
 
-from typing import Union, Optional
+from typing import Union
 
 import torch
 from torch.optim import Optimizer
@@ -17,9 +17,13 @@ class dOGR(Optimizer):
         params: ParamsT,
         lr: Union[float, Tensor] = 1e-3,
         beta: float = 0.50,
-        eps: float = 1e-4,
+        eps: float = 1e-8,
+        sec_ord_lr: float = 0.5,
+        gamma: float = 0.5,
+        clip_min: float = 5, 
+        clip_max: float = 5, 
         maximize: bool = False,
-        differentiable: bool = False
+        differentiable: bool = False,
     ):
         if isinstance(lr, Tensor) and lr.numel() != 1:
             raise ValueError("Tensor lr must be 1-element")
@@ -31,6 +35,10 @@ class dOGR(Optimizer):
             "maximize": maximize,
             "beta": beta,
             "eps": eps,
+            "gamma": gamma, 
+            "sec_ord_lr": sec_ord_lr, 
+            "clip_min": clip_min, 
+            "clip_max": clip_max, 
             "differentiable": differentiable,
         }
 
@@ -43,6 +51,7 @@ class dOGR(Optimizer):
         grads,
         mean_params: list[Tensor],
         mean_grads: list[Tensor],
+        mean_grads_gamma: list[Tensor],
         d_params_params: list[Tensor],
         d_grads_params: list[Tensor],
         mean: list[Tensor],
@@ -69,12 +78,14 @@ class dOGR(Optimizer):
 
                 init_as_zero("mean_params")
                 init_as_zero("mean_grads")
+                init_as_zero("mean_grads_gamma")
                 init_as_zero("d_params_params")
                 init_as_zero("d_grads_params")
                 init_as_zero("mean")
 
             mean_params.append(state["mean_params"])
             mean_grads.append(state["mean_grads"])
+            mean_grads_gamma.append(state["mean_grads_gamma"])
             d_params_params.append(state["d_params_params"])
             d_grads_params.append(state["d_grads_params"])
             mean.append(state["mean"])
@@ -93,6 +104,7 @@ class dOGR(Optimizer):
             grads: list[Tensor] = []
             mean_params: list[Tensor] = []
             mean_grads: list[Tensor] = []
+            mean_grads_gamma: list[Tensor] = []
             d_params_params: list[Tensor] = []
             d_grads_params: list[Tensor] = []
             mean: list[Tensor] = []
@@ -103,6 +115,7 @@ class dOGR(Optimizer):
                 grads=grads,
                 mean_params=mean_params,
                 mean_grads=mean_grads,
+                mean_grads_gamma=mean_grads_gamma,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
                 mean=mean,
@@ -114,8 +127,13 @@ class dOGR(Optimizer):
                 lr=group["lr"],
                 beta=group["beta"],
                 eps=group["eps"],
+                sec_ord_lr=group["sec_ord_lr"],
+                gamma=group["gamma"],
+                clip_max=group["clip_max"],
+                clip_min=group["clip_min"],
                 mean_params=mean_params,
                 mean_grads=mean_grads,
+                mean_grads_gamma=mean_grads_gamma,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
                 mean=mean,
@@ -129,10 +147,15 @@ def dogr(
     params: list[Tensor],
     grads: list[Tensor],
     lr: float,
+    sec_ord_lr: float,
     beta: float,
     eps: float,
+    gamma: float,
+    clip_min: float, 
+    clip_max: float, 
     mean_params: list[Tensor],
     mean_grads: list[Tensor],
+    mean_grads_gamma: list[Tensor],
     d_params_params: list[Tensor],
     d_grads_params: list[Tensor],
     mean: list[Tensor],
@@ -150,6 +173,7 @@ def dogr(
 
         # mean_g = beta * g + (1 - beta) * g
         mean_grads[i] += beta * (grad - mean_grads[i])
+        mean_grads_gamma[i] += gamma * (grad - mean_grads_gamma[i])
 
         # s = beta * s + 1
         mean[i] += (beta - 1) * mean[i] + 1
@@ -165,15 +189,18 @@ def dogr(
         )
 
         # Diagonal Hessian
-        H_inv = d_params_params[i] / (
-            d_grads_params[i] + torch.sign(d_grads_params[i]) * eps
-        )
-
-        # Calculate p
-        p = (mean_params[i] - H_inv * mean_grads[i]) / (mean[i] + eps)
-
-        H_sign = torch.sign(H_inv)
+        H_sign = torch.sign(d_grads_params[i])
+        H = d_grads_params[i] / (d_params_params[i] + eps)
 
         # theta = theta + sing(H)(p - param)
-        # param.add_(H_sign * (p - param), alpha=lr)
-       # param.add_(grad, alpha=-lr)        if isinstance(lr, Tensor):
+        cliped = torch.clip(H, min=clip_min, max=clip_max)
+        param.add_(
+            torch.where(
+                H_sign == 0,
+                - grad * lr,
+                - 1 / cliped * mean_grads_gamma[i] * sec_ord_lr,
+            ),
+        )
+
+        if torch.isnan(param).int().sum() > 0:
+            raise ValueError("nan in parameters")
