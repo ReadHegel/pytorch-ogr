@@ -20,11 +20,14 @@ class dOGR(Optimizer):
         eps: float = 1e-8,
         maximize: bool = False,
         differentiable: bool = False,
+        hybrid_clipping: bool = False,
+        neg_clip_val: Optional[float] = None,
     ):
         if isinstance(lr, Tensor) and lr.numel() != 1:
             raise ValueError("Tensor lr must be 1-element")
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
+
 
         defaults = {
             "lr": lr,
@@ -32,6 +35,8 @@ class dOGR(Optimizer):
             "beta": beta,
             "eps": eps,
             "differentiable": differentiable,
+            "hybrid_clipping": hybrid_clipping,
+            "neg_clip_val": neg_clip_val,
         }
 
         super().__init__(params, defaults)
@@ -120,6 +125,8 @@ class dOGR(Optimizer):
                 d_grads_params=d_grads_params,
                 mean=mean,
                 maximize=group["maximize"],
+                hybrid_clipping=group["hybrid_clipping"],
+                neg_clip_val=group["neg_clip_val"],
             )
 
         return loss
@@ -137,6 +144,8 @@ def dogr(
     d_grads_params: list[Tensor],
     mean: list[Tensor],
     maximize: bool,
+    hybrid_clipping: bool,
+    neg_clip_val: Optional[float],
 ):
     for i, param in enumerate(params):
         grad = grads[i] if not maximize else -grads[i]
@@ -169,14 +178,30 @@ def dogr(
         H = d_grads_params[i] / (d_params_params[i] + eps)
 
         # theta = theta + sing(H)(p - param)
-        param.add_(
-            torch.where(
-                H_sign == 0,
-                - grad * lr,
-                - 1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H)) * mean_grads[i],
-            ),
-        )
+        if not hybrid_clipping:
+            param.add_(
+                torch.where(
+                    H_sign == 0,
+                    - grad * lr,
+                    - 1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H)) * mean_grads[i],
+                ),
+            )
+        else:
+            normal_step = - (1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H))) * mean_grads[i]
+            aggressive_clip_step = - (1 / torch.maximum(torch.abs(H) * 1.5, neg_clip_val * torch.ones_like(H))) * mean_grads[i]
+
+            param.add_(
+                torch.where(
+                    H > 0,
+                    normal_step,
+                    torch.where(
+                        H < 0,
+                        aggressive_clip_step,
+                        -grad * lr
+                    )
+                )
+            )
 
         # for debug
-        if torch.isnan(param).int().sum() > 0:
-            quit(0)
+        if torch.isnan(param).any():
+            raise RuntimeError("Wykryto wartość NaN w parametrach - trening jest niestabilny.")
