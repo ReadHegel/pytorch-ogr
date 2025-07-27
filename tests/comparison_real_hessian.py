@@ -84,8 +84,8 @@ def dOGR_hessian(
             (grad - local_mean_grads) * (param - local_mean_params) - d_grads_params[i]
         )
 
-        # Diagonal Hessian
-        print(local_d_params_params)
+        # # Diagonal Hessian
+        # print(local_d_params_params)
         Hs.append(
             local_d_grads_params
             / local_d_params_params
@@ -113,23 +113,29 @@ def get_hessian(grads, params):
     return Hs
 
 
-import matplotlib.lines as mlines
-import matplotlib.transforms as mtransforms
-
-
 def plot(Hs, estimated_Hs, title: str = ""):
     fig, ax = plt.subplots()
+
+    count = 0
+    count_bigger = 0
+    minn = 100
 
     for H, est_H in zip(Hs, estimated_Hs):
         H = H.flatten()
         est_H = est_H.flatten()
 
+        count_bigger += (est_H > 5).int().sum()
+        count += est_H.shape[0]
+        minn = min(minn, torch.min(H).item())
         # mask = abs(est_H) < 10
         #
         # H = H[mask]
         # est_H = est_H[mask]
 
         ax.scatter(H.numpy(force=True), est_H.numpy(force=True), color="b")
+
+    print(count, count_bigger, count_bigger / count)
+    print(minn)
 
     # Center plot
     yabs_max = abs(max(ax.get_ylim(), key=abs))
@@ -170,30 +176,30 @@ def compare_with_hessian(net, optim, batch: Tuple[Tensor, Tensor], name: str):
     # In fact this is diag(Hess)
     estimated_Hs = estimate_hessian(optim)
 
-    print("estimated_hessian: ", estimated_Hs)
+    # print("estimated_hessian: ", estimated_Hs)
 
     # Computing hessian with backpropagation
-    print(f"params: {net.parameters()}")
+    # print(f"params: {net.parameters()}")
 
     optim.zero_grad()
 
     loss_grad = grad(loss, net.parameters(), create_graph=True)
-    print(f"loss_grad: {loss_grad}")
+    # print(f"loss_grad: {loss_grad}")
 
-    print(f"params: {list(net.parameters())}")
+    # print(f"params: {list(net.parameters())}")
     # In fact this is diag(Hess)
     Hs = get_hessian(loss_grad, net.parameters())
-    print(f"Hs: {Hs}")
+    # print(f"Hs: {Hs}")
 
     plot(Hs, estimated_Hs, name)
 
 
 def test1():
-    real_H = torch.ones((2, 2), requires_grad=True)
+    real_H = torch.rand((2, 2), requires_grad=True)
     print(f"real_H: {real_H}")
-    h = torch.ones(1, requires_grad=True)
+    h = torch.rand(1, requires_grad=True)
     print(f"h: {h}")
-    p = torch.zeros(2, requires_grad=True)
+    p = torch.rand(2, requires_grad=True)
     print(f"p: {p}")
 
     params = torch.rand(2, requires_grad=True)
@@ -231,19 +237,19 @@ def test2():
 
 def test3():
     net = get_mini_FC()
-    optimizer = dOGR(net.parameters(), eps = 0)
+    optimizer = dOGR(net.parameters(), eps=0)
     # optimizer = torch.optim.Adam(net.parameters())
 
     run(
         net,
         optimizer,
-        max_epochs=5,
-        batch_size=64,
+        max_epochs=1,
+        batch_size=32,
         version=1,
         name="real_hess",
     )
 
-    datamodule = MNISTDataModule(64)
+    datamodule = MNISTDataModule(32)
     datamodule.prepare_data()
     datamodule.setup()
 

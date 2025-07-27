@@ -13,9 +13,12 @@ def get_FC():
 
 def get_mini_FC(): 
     return nn.Sequential(
-        nn.MaxPool2d(2),
-        nn.Flatten(), 
-        nn.Linear(14 * 14, 20),
+        nn.Conv2d(1, 2, kernel_size=2, stride=2),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(2 * 14 * 14, 20),
+        nn.ReLU(),
+        nn.Linear(20, 20), 
         nn.ReLU(),
         nn.Linear(20, 10),
     )
