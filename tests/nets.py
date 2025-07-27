@@ -11,6 +11,15 @@ def get_FC():
         nn.Linear(64, 10),
     )
 
+def get_mini_FC(): 
+    return nn.Sequential(
+        nn.MaxPool2d(2),
+        nn.Flatten(), 
+        nn.Linear(14 * 14, 20),
+        nn.ReLU(),
+        nn.Linear(20, 10),
+    )
+
 def get_LeNet(): 
     return nn.Sequential(
         nn.Conv2d(in_channels=1, out_channels=6, kernel_size=5), 
