@@ -17,9 +17,9 @@ def get_mini_FC():
         nn.ReLU(),
         nn.Flatten(),
         nn.Linear(2 * 14 * 14, 20),
-        nn.ReLU(),
+        nn.Sigmoid(),
         nn.Linear(20, 20), 
-        nn.ReLU(),
+        nn.Sigmoid(),
         nn.Linear(20, 10),
     )
 

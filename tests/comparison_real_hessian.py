@@ -162,6 +162,22 @@ def plot(Hs, estimated_Hs, title: str = ""):
 
     plt.show()
 
+# eval Hessian matrix
+def eval_hessian(loss_grad, model):
+    cnt = 0
+    for g in loss_grad:
+        g_vector = g.contiguous().view(-1) if cnt == 0 else torch.cat([g_vector, g.contiguous().view(-1)])
+        cnt = 1
+    l = g_vector.size(0)
+    hessian = torch.zeros(l, l)
+    for idx in range(l):
+        grad2rd = grad(g_vector[idx], model.parameters(), create_graph=True)
+        cnt = 0
+        for g in grad2rd:
+            g2 = g.contiguous().view(-1) if cnt == 0 else torch.cat([g2, g.contiguous().view(-1)])
+            cnt = 1
+        hessian[idx] = g2
+    return hessian
 
 def compare_with_hessian(net, optim, batch: Tuple[Tensor, Tensor], name: str):
     optim.zero_grad()
@@ -188,8 +204,38 @@ def compare_with_hessian(net, optim, batch: Tuple[Tensor, Tensor], name: str):
 
     # print(f"params: {list(net.parameters())}")
     # In fact this is diag(Hess)
-    Hs = get_hessian(loss_grad, net.parameters())
-    # print(f"Hs: {Hs}")
+    # Hs = get_hessian(loss_grad, net.parameters())
+
+    optim.zero_grad()
+
+    
+    Hs = eval_hessian(loss_grad, net)
+    diag = torch.diag(Hs)
+    print("eig:")
+    eig = (torch.linalg.eig(Hs)[0]).double()
+    print(torch.sort(eig))
+    print(torch.diag(Hs))
+    print(torch.min(diag), torch.max(diag))
+    # def f(*params):
+    #     # Update model parameters manually
+    #     with torch.no_grad():
+    #         for p, new_p in zip(net.parameters(), params):
+    #             p.copy_(new_p)
+    #
+    #     x, y = batch
+    #     logits = net(x)
+    #     return F.cross_entropy(logits, y)
+    #
+    # # Get parameters as a tuple of tensors
+    # params = tuple(p.detach().clone().requires_grad_(True) for p in net.parameters())
+    #
+    # # Compute Hessian
+    # hess = torch.autograd.functional.hessian(f, params)
+    #
+    # print(
+    #     "DUPADUPADUPA",
+    #     hess
+    # )
 
     plot(Hs, estimated_Hs, name)
 
@@ -260,5 +306,5 @@ def test3():
 
 
 if __name__ == "__main__":
-    # test2()
     test3()
+    # test3()
