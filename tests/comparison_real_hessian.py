@@ -5,6 +5,7 @@ from torch.autograd import grad
 from typing import Tuple
 import matplotlib.pyplot as plt
 import numpy as np
+import torch.nn.init as init
 
 from src.optim.dOGR import dOGR
 from .nets import get_mini_FC, get_FC
@@ -162,11 +163,16 @@ def plot(Hs, estimated_Hs, title: str = ""):
 
     plt.show()
 
+
 # eval Hessian matrix
 def eval_hessian(loss_grad, model):
     cnt = 0
     for g in loss_grad:
-        g_vector = g.contiguous().view(-1) if cnt == 0 else torch.cat([g_vector, g.contiguous().view(-1)])
+        g_vector = (
+            g.contiguous().view(-1)
+            if cnt == 0
+            else torch.cat([g_vector, g.contiguous().view(-1)])
+        )
         cnt = 1
     l = g_vector.size(0)
     hessian = torch.zeros(l, l)
@@ -174,10 +180,15 @@ def eval_hessian(loss_grad, model):
         grad2rd = grad(g_vector[idx], model.parameters(), create_graph=True)
         cnt = 0
         for g in grad2rd:
-            g2 = g.contiguous().view(-1) if cnt == 0 else torch.cat([g2, g.contiguous().view(-1)])
+            g2 = (
+                g.contiguous().view(-1)
+                if cnt == 0
+                else torch.cat([g2, g.contiguous().view(-1)])
+            )
             cnt = 1
         hessian[idx] = g2
     return hessian
+
 
 def compare_with_hessian(net, optim, batch: Tuple[Tensor, Tensor], name: str):
     optim.zero_grad()
@@ -204,18 +215,17 @@ def compare_with_hessian(net, optim, batch: Tuple[Tensor, Tensor], name: str):
 
     # print(f"params: {list(net.parameters())}")
     # In fact this is diag(Hess)
-    # Hs = get_hessian(loss_grad, net.parameters())
+    Hs = get_hessian(loss_grad, net.parameters())
 
-    optim.zero_grad()
-
-    
-    Hs = eval_hessian(loss_grad, net)
-    diag = torch.diag(Hs)
-    print("eig:")
-    eig = (torch.linalg.eig(Hs)[0]).double()
-    print(torch.sort(eig))
-    print(torch.diag(Hs))
-    print(torch.min(diag), torch.max(diag))
+    # optim.zero_grad()
+    #
+    # Hs = eval_hessian(loss_grad, net)
+    # diag = torch.diag(Hs)
+    # print("eig:")
+    # eig = (torch.linalg.eig(Hs)[0]).double()
+    # print(torch.sort(eig))
+    # print(torch.diag(Hs))
+    # print(torch.min(diag), torch.max(diag))
     # def f(*params):
     #     # Update model parameters manually
     #     with torch.no_grad():
@@ -236,8 +246,156 @@ def compare_with_hessian(net, optim, batch: Tuple[Tensor, Tensor], name: str):
     #     "DUPADUPADUPA",
     #     hess
     # )
-
+    print("Hs: ", Hs, "est_Hs", estimated_Hs)
     plot(Hs, estimated_Hs, name)
+    parameter_plot(
+        net,
+        Hs=Hs,
+        est_Hs=estimated_Hs,
+        param_name="weight",
+        param_index=(0, 0),
+        x=batch[0],
+        y=batch[1],
+    )
+
+
+additional_points_to_plot = []
+grads_points = []
+
+
+def parameter_plot(
+    net,
+    Hs,
+    est_Hs,
+    param_name,
+    param_index,
+    x,
+    y,
+):
+    target_param = None
+    target_i = None
+    for i, (name, param) in enumerate(net.named_parameters()):
+        print(name)
+        if name == param_name:
+            target_param = param
+            target_i = i
+            break
+
+    if target_param is None:
+        raise ValueError(f"Prameter: {param_name} not found")
+
+    hs = Hs[i][param_index].item()
+    est_hs = est_Hs[i][param_index].item()
+
+    original_value = target_param[param_index].item()
+    pred = net(x)
+    original_loss = F.cross_entropy(pred, y)
+    original_loss.backward()
+    original_loss = original_loss.item()
+
+    grad_value = target_param.grad[param_index].item()
+
+    values = torch.linspace(
+        original_value - 0.6, original_value + 0.6, 50, requires_grad=False
+    )
+    losses = []
+
+    for val in values:
+        with torch.no_grad():
+            target_param[param_index] = val
+
+            pred = net(x)
+            loss = F.cross_entropy(pred, y)
+            losses.append(loss.item())
+
+    with torch.no_grad():
+        target_param[param_index] = original_value
+
+    # ---------- PLOT ------------
+    def get_parabola(x, f, df, ddf, values):
+        print(x, f, df, ddf)
+        a = ddf / 2
+        b = df - 2 * a * x
+        c = f - (a * x * x + b * x)
+        return a * values * values + b * values + c
+
+    def interpole_parabole(tab, values):
+        x = np.array([p[0] for p in tab])
+        y = np.array([p[1] for p in tab])
+
+        a, b, c = np.polyfit(x, y, deg=2)
+        return a * values * values + b * values + c
+
+    plt.plot(values.numpy(), losses, label="loss ( parameter )")
+    plt.plot(
+        values.numpy(),
+        # original_loss + hs * (values.numpy() - original_value),
+        get_parabola(
+            original_value,
+            original_loss,
+            grad_value,
+            hs,
+            values.numpy(),
+        ),
+        label="Parabola estimated with real 2nd deriv",
+    )
+    plt.plot(
+        values.numpy(),
+        interpole_parabole(additional_points_to_plot, values.numpy()),
+        "r--",
+        label="interpolated parabola",
+    )
+    plt.plot(
+        values.numpy(),
+        grad_value + est_hs * (values.numpy() - original_value),
+        label="estimated line of gradients by dOGR",
+    )
+    plt.plot(
+        values.numpy(),
+        grad_value + hs * (values.numpy() - original_value),
+        label="line with tangent equal 2nd deriviative",
+    )
+    plt.plot(
+        values.numpy(),
+        # original_loss + est_hs * (values.numpy() - original_value),
+        get_parabola(
+            original_value,
+            original_loss,
+            grad_value,
+            est_hs,
+            values.numpy(),
+        ),
+        label="Parabola estimated with dOGR",
+    )
+    plt.scatter(
+        original_value, original_loss, color="red", zorder=5, label="loss value"
+    )
+    plt.scatter(
+        original_value, grad_value, color="green", zorder=5, label="derivative value"
+    )
+    plt.scatter(
+        -grad_value / est_hs + original_value, 0,
+        marker="x", color="green", zorder=5, label="root of line of dOGR gradients"
+    )
+    for point in additional_points_to_plot:
+        plt.scatter(
+            point[0],
+            point[1],
+            color="red",
+            zorder=5,
+        )
+    for point in grads_points:
+        plt.scatter(
+            point[0],
+            point[1],
+            color="green",
+            zorder=5,
+        )
+    plt.xlabel(f"Parameter value {param_name}{param_index}")
+    plt.ylabel("Loss")
+    plt.title("Dependence of loss on parameter")
+    plt.legend()
+    plt.show()
 
 
 def test1():
@@ -263,39 +421,57 @@ def test1():
 
 
 def test2():
-    BATCH_SIZE = 2
+    global additional_points_to_plot
+
+    BATCH_SIZE = 256
     net = torch.nn.Linear(3, 4)
-    torch.nn.init.ones_(net.weight)
-    torch.nn.init.ones_(net.bias)
-    optim = dOGR(net.parameters())
-    batch1 = (torch.ones(BATCH_SIZE, 3), torch.zeros(BATCH_SIZE, dtype=torch.long))
-    batch2 = (torch.ones(BATCH_SIZE, 3), torch.zeros(BATCH_SIZE, dtype=torch.long))
+    init.normal_(net.weight, mean=0.0, std=0.25)
+    optim = dOGR(net.parameters(), beta=0.8)
 
-    optim.zero_grad()
-    x, y = batch1
-    logits = net(x)
-    loss = F.cross_entropy(logits, y)
-    loss.backward()
-    optim.step()
+    for i in range(4):
+        optim.zero_grad()
+        batch = (torch.ones(BATCH_SIZE, 3), torch.zeros(BATCH_SIZE, dtype=torch.long))
+        x, y = batch
+        logits = net(x)
+        loss = F.cross_entropy(logits, y)
+        loss.backward()
 
-    compare_with_hessian(net, optim, batch2, "DUPA")
+        additional_points_to_plot.append(
+            (
+                dict(net.named_parameters())["weight"][0, 0].item(),
+                loss.item(),
+            )
+        )
+        grads_points.append(
+            (
+                dict(net.named_parameters())["weight"][0, 0].item(),
+                dict(net.named_parameters())["weight"].grad[0, 0].item(),
+            )
+        )
+
+        optim.step()
+
+    batch = (torch.ones(BATCH_SIZE, 3), torch.zeros(BATCH_SIZE, dtype=torch.long))
+    compare_with_hessian(net, optim, batch, "nazwa jakas tam")
 
 
 def test3():
     net = get_mini_FC()
-    optimizer = dOGR(net.parameters(), eps=0)
+    optimizer = dOGR(net.parameters(), beta=0.8)
+    pytorch_total_params = sum(p.numel() for p in net.parameters())
+    print(pytorch_total_params)
     # optimizer = torch.optim.Adam(net.parameters())
 
     run(
         net,
         optimizer,
         max_epochs=1,
-        batch_size=32,
+        batch_size=128,
         version=1,
         name="real_hess",
     )
 
-    datamodule = MNISTDataModule(32)
+    datamodule = MNISTDataModule(128)
     datamodule.prepare_data()
     datamodule.setup()
 
@@ -306,5 +482,5 @@ def test3():
 
 
 if __name__ == "__main__":
-    test3()
+    test2()
     # test3()
