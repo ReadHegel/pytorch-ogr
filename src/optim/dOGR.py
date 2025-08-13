@@ -128,6 +128,16 @@ class dOGR(Optimizer):
                 neg_clip_val=group["neg_clip_val"],
             )
 
+            for p, mean_param, mean_grad, d_pp, d_gp, mean in zip(
+                params, mean_params, mean_grads, d_params_params, d_grads_params, means
+            ):
+                state = self.state[p]
+                state["mean_params"] = mean_param
+                state["mean_grads"] = mean_grad
+                state["d_params_params"] = d_pp
+                state["d_grads_params"] = d_gp
+                state["means"] = mean 
+
         return loss
 
     def get_hessian(self):
@@ -166,7 +176,7 @@ class dOGR(Optimizer):
                 _,
                 new_d_params_params,
                 new_d_grads_params,
-            ) = __get_new_moving_average(
+            ) = _get_new_moving_average(
                 param=param[i],
                 grad=grad,
                 beta=group["beta"],
@@ -178,7 +188,7 @@ class dOGR(Optimizer):
             )
 
             # Diagonal Hessian
-            H, _ = __get_hessian(
+            H, _ = _get_hessian(
                 d_params_param=new_d_params_params,
                 d_grads_param=new_d_grads_params,
                 eps=group["eps"],
@@ -188,25 +198,7 @@ class dOGR(Optimizer):
         return Hs
 
 
-def get_dogr_hessian(
-    params: list[Tensor],
-    grads: list[Tensor],
-    lr: float,
-    beta: float,
-    eps: float,
-    mean_params: list[Tensor],
-    mean_grads: list[Tensor],
-    d_params_params: list[Tensor],
-    d_grads_params: list[Tensor],
-    means: list[Tensor],
-    maximize: bool,
-    hybrid_clipping: bool,
-    neg_clip_val: Optional[float],
-):
-    pass
-
-
-def __get_new_moving_average(
+def _get_new_moving_average(
     param: Tensor,
     grad: Tensor,
     beta: float,
@@ -215,7 +207,6 @@ def __get_new_moving_average(
     d_params_param: Tensor,
     d_grads_param: Tensor,
     mean: Tensor,
-    update: bool = False,
 ):
     # Calculate means
     # In comments we include the formulas with symbols coresponing
@@ -248,7 +239,7 @@ def __get_new_moving_average(
     )
 
 
-def __get_hessian(
+def _get_hessian(
     d_params_param: Tensor,
     d_grads_param: Tensor,
     eps: float,
@@ -283,7 +274,7 @@ def dogr(
             new_mean,
             new_d_params_params,
             new_d_grads_params,
-        ) = __get_new_moving_average(
+        ) = _get_new_moving_average(
             param=param[i],
             grad=grad,
             beta=beta,
@@ -301,7 +292,7 @@ def dogr(
         means[i] = new_mean
 
         # Diagonal Hessian
-        H, H_sign = __get_hessian(
+        H, H_sign = _get_hessian(
             d_params_param=d_params_params[i],
             d_grads_param=d_grads_params[i],
             eps=eps,
