@@ -20,6 +20,8 @@ class dOGR(Optimizer):
         eps: float = 1e-8,
         maximize: bool = False,
         differentiable: bool = False,
+        hybrid_clipping: bool = False,
+        neg_clip_val: Optional[float] = None,
     ):
         if isinstance(lr, Tensor) and lr.numel() != 1:
             raise ValueError("Tensor lr must be 1-element")
@@ -32,6 +34,8 @@ class dOGR(Optimizer):
             "beta": beta,
             "eps": eps,
             "differentiable": differentiable,
+            "hybrid_clipping": hybrid_clipping,
+            "neg_clip_val": neg_clip_val,
         }
 
         super().__init__(params, defaults)
@@ -45,7 +49,7 @@ class dOGR(Optimizer):
         mean_grads: list[Tensor],
         d_params_params: list[Tensor],
         d_grads_params: list[Tensor],
-        mean: list[Tensor],
+        means: list[Tensor],
     ):
         has_sparse_grad = False
 
@@ -71,13 +75,13 @@ class dOGR(Optimizer):
                 init_as_zero("mean_grads")
                 init_as_zero("d_params_params")
                 init_as_zero("d_grads_params")
-                init_as_zero("mean")
+                init_as_zero("means")
 
             mean_params.append(state["mean_params"])
             mean_grads.append(state["mean_grads"])
             d_params_params.append(state["d_params_params"])
             d_grads_params.append(state["d_grads_params"])
-            mean.append(state["mean"])
+            means.append(state["means"])
 
         return has_sparse_grad
 
@@ -95,7 +99,7 @@ class dOGR(Optimizer):
             mean_grads: list[Tensor] = []
             d_params_params: list[Tensor] = []
             d_grads_params: list[Tensor] = []
-            mean: list[Tensor] = []
+            means: list[Tensor] = []
 
             has_sparse_grad = self._init_group(
                 group=group,
@@ -105,7 +109,7 @@ class dOGR(Optimizer):
                 mean_grads=mean_grads,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
-                mean=mean,
+                means=means,
             )
 
             dogr(
@@ -118,11 +122,141 @@ class dOGR(Optimizer):
                 mean_grads=mean_grads,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
-                mean=mean,
+                means=means,
                 maximize=group["maximize"],
+                hybrid_clipping=group["hybrid_clipping"],
+                neg_clip_val=group["neg_clip_val"],
             )
 
         return loss
+
+    def get_hessian(self):
+        if len(self.param_groups) > 1:
+            raise ValueError("Can't get the hessian with more then one group")
+
+        group = next(iter(self.param_groups))
+
+        params: list[Tensor] = []
+        grads: list[Tensor] = []
+        mean_params: list[Tensor] = []
+        mean_grads: list[Tensor] = []
+        d_params_params: list[Tensor] = []
+        d_grads_params: list[Tensor] = []
+        means: list[Tensor] = []
+
+        _ = self._init_group(
+            group=group,
+            params=params,
+            grads=grads,
+            mean_params=mean_params,
+            mean_grads=mean_grads,
+            d_params_params=d_params_params,
+            d_grads_params=d_grads_params,
+            means=means,
+        )
+
+        Hs = []
+
+        for i, param in enumerate(params):
+            grad = grads[i] if not group["maximize"] else -grads[i]
+
+            (
+                _,
+                _,
+                _,
+                new_d_params_params,
+                new_d_grads_params,
+            ) = __get_new_moving_average(
+                param=param[i],
+                grad=grad,
+                beta=group["beta"],
+                mean_param=mean_params[i],
+                mean_grad=mean_grads[i],
+                d_params_param=d_params_params[i],
+                d_grads_param=d_grads_params[i],
+                mean=means[i],
+            )
+
+            # Diagonal Hessian
+            H, _ = __get_hessian(
+                d_params_param=new_d_params_params,
+                d_grads_param=new_d_grads_params,
+                eps=group["eps"],
+            )
+            Hs.append(H)
+
+        return Hs
+
+
+def get_dogr_hessian(
+    params: list[Tensor],
+    grads: list[Tensor],
+    lr: float,
+    beta: float,
+    eps: float,
+    mean_params: list[Tensor],
+    mean_grads: list[Tensor],
+    d_params_params: list[Tensor],
+    d_grads_params: list[Tensor],
+    means: list[Tensor],
+    maximize: bool,
+    hybrid_clipping: bool,
+    neg_clip_val: Optional[float],
+):
+    pass
+
+
+def __get_new_moving_average(
+    param: Tensor,
+    grad: Tensor,
+    beta: float,
+    mean_param: Tensor,
+    mean_grad: Tensor,
+    d_params_param: Tensor,
+    d_grads_param: Tensor,
+    mean: Tensor,
+    update: bool = False,
+):
+    # Calculate means
+    # In comments we include the formulas with symbols coresponing
+    # to ones used in the paper https://arxiv.org/pdf/1901.11457
+
+    # mean_theta = beta * theta + (1 - beta) mean_theta
+    local_mean_params = mean_param + beta * (param - mean_param)
+
+    # mean_g = beta * g + (1 - beta) * g
+    local_mean_grads = mean_grad + beta * (grad - mean_grad)
+
+    local_mean = mean * beta + 1
+
+    # d_theta_theta = (1 - beta) * theta_hat_mean**2 + beta * theta_hat**2
+    local_d_params_params = d_params_param + beta * (
+        (param - local_mean_params) ** 2 - d_params_param
+    )
+
+    # d_g_theta = (1 - beta) * d_g_theta + beta * g_hat_theta_hat
+    local_d_grads_params = d_grads_param + beta * (
+        (grad - local_mean_grads) * (param - local_mean_params) - d_grads_param
+    )
+
+    return (
+        local_mean_params,
+        local_mean_grads,
+        local_mean,
+        local_d_params_params,
+        local_d_grads_params,
+    )
+
+
+def __get_hessian(
+    d_params_param: Tensor,
+    d_grads_param: Tensor,
+    eps: float,
+):
+    H_sign = torch.sign(d_grads_param)
+    H = d_grads_param / (d_params_param + eps)
+
+    return H, H_sign
 
 
 def dogr(
@@ -135,48 +269,80 @@ def dogr(
     mean_grads: list[Tensor],
     d_params_params: list[Tensor],
     d_grads_params: list[Tensor],
-    mean: list[Tensor],
+    means: list[Tensor],
     maximize: bool,
+    hybrid_clipping: bool,
+    neg_clip_val: Optional[float],
 ):
     for i, param in enumerate(params):
         grad = grads[i] if not maximize else -grads[i]
 
-        # Calculate means
-        # In comments we include the formulas with symbols coresponing
-        # to ones used in the paper https://arxiv.org/pdf/1901.11457
-
-        # mean_theta = beta * theta + (1 - beta) mean_theta
-        mean_params[i] += beta * (param - mean_params[i])
-
-        # mean_g = beta * g + (1 - beta) * g
-        mean_grads[i] += beta * (grad - mean_grads[i])
-
-        # s = beta * s + 1
-        mean[i] += (beta - 1) * mean[i] + 1
-
-        # d_theta_theta = (1 - beta) * theta_hat_mean**2 + beta * theta_hat**2
-        d_params_params[i] += beta * (
-            (param - mean_params[i]) ** 2 - d_params_params[i]
+        (
+            new_mean_params,
+            new_mean_grads,
+            new_mean,
+            new_d_params_params,
+            new_d_grads_params,
+        ) = __get_new_moving_average(
+            param=param[i],
+            grad=grad,
+            beta=beta,
+            mean_param=mean_params[i],
+            mean_grad=mean_grads[i],
+            d_params_param=d_params_params[i],
+            d_grads_param=d_grads_params[i],
+            mean=means[i],
         )
 
-        # d_g_theta = (1 - beta) * d_g_theta + beta * g_hat_theta_hat
-        d_grads_params[i] += beta * (
-            (grad - mean_grads[i]) * (param - mean_params[i]) - d_grads_params[i]
-        )
+        mean_params[i] = new_mean_params
+        mean_grads[i] = new_mean_grads
+        d_params_params[i] = new_d_params_params
+        d_grads_params[i] = new_d_grads_params
+        means[i] = new_mean
 
         # Diagonal Hessian
-        H_sign = torch.sign(d_grads_params[i])
-        H = d_grads_params[i] / (d_params_params[i] + eps)
-
-        # theta = theta + sing(H)(p - param)
-        param.add_(
-            torch.where(
-                H_sign == 0,
-                - grad * lr,
-                - 1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H)) * mean_grads[i],
-            ),
+        H, H_sign = __get_hessian(
+            d_params_param=d_params_params[i],
+            d_grads_param=d_grads_params[i],
+            eps=eps,
         )
 
+        # theta = theta + sing(H)(p - param)
+        if not hybrid_clipping:
+            param.add_(
+                torch.where(
+                    H_sign == 0,
+                    -grad * lr,
+                    -1
+                    / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H))
+                    * mean_grads[i],
+                ),
+            )
+        else:
+            normal_step = (
+                -(1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H)))
+                * mean_grads[i]
+            )
+            aggressive_clip_step = (
+                -(
+                    1
+                    / torch.maximum(
+                        torch.abs(H) * 1.5, neg_clip_val * torch.ones_like(H)
+                    )
+                )
+                * mean_grads[i]
+            )
+
+            param.add_(
+                torch.where(
+                    H > 0,
+                    normal_step,
+                    torch.where(H < 0, aggressive_clip_step, -grad * lr),
+                )
+            )
+
         # for debug
-        if torch.isnan(param).int().sum() > 0:
-            quit(0)
+        if torch.isnan(param).any():
+            raise RuntimeError(
+                "Wykryto wartość NaN w parametrach - trening jest niestabilny."
+            )
