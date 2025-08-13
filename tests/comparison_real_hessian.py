@@ -50,12 +50,12 @@ def get_bp_hessian(grads, params):
         snd_grad = []
 
         for i in range(param.numel()):
-            snd_grad.append(
-                grad(outputs=grd.flatten()[i], inputs=param, create_graph=True)[
+            g = grad(outputs=grd.flatten()[i], inputs=param, create_graph=True)[
                     0
-                ].flatten()[i]
+                ].flatten()
+            snd_grad.append(
+                g[i]
             )
-
         Hs.append(torch.stack(snd_grad).reshape_as(param))
     return Hs
 
@@ -112,7 +112,6 @@ def one_parameter_plot(
     target_param = None
     target_i = None
     for i, (name, param) in enumerate(net.named_parameters()):
-        print(name)
         if name == param_name:
             target_param = param
             target_i = i
@@ -153,7 +152,6 @@ def one_parameter_plot(
     # ---------- PLOT ------------
 
     def get_parabola(x, f, df, ddf, values):
-        print(x, f, df, ddf)
         a = ddf / 2
         b = df - 2 * a * x
         c = f - (a * x * x + b * x)
@@ -208,7 +206,7 @@ def one_parameter_plot(
         original_value, grad_value, color="green", zorder=5, label="derivative value"
     )
     plt.scatter(
-        -grad_value / est_hs + original_value,
+        - mean_grad_value / est_hs + original_value,
         0,
         marker="x",
         color="green",
@@ -286,7 +284,7 @@ def run_and_plot(
     loss_grad = grad(loss, net.parameters(), create_graph=True)
     Hs = get_bp_hessian(loss_grad, net.parameters())
 
-    print("Hs: ", Hs, "est_Hs", est_Hs)
+    # print("Hs: ", Hs, "est_Hs", est_Hs)
     plot_compararion(Hs, est_Hs)
     parameter_plot(
         net,
@@ -370,6 +368,9 @@ def test2():
                         .item(),
                     )
                 )
+            
+            if i == N - 1: 
+                break
 
             optim.step()
         return loss
@@ -388,32 +389,94 @@ def test2():
     )
 
 
-# def test3():
-#     net = get_mini_FC()
-#     optimizer = dOGR(net.parameters(), beta=0.8)
-#     pytorch_total_params = sum(p.numel() for p in net.parameters())
-#     print(pytorch_total_params)
-#     # optimizer = torch.optim.Adam(net.parameters())
-#
-#     run(
-#         net,
-#         optimizer,
-#         max_epochs=1,
-#         batch_size=128,
-#         version=1,
-#         name="real_hess",
-#     )
-#
-#     datamodule = MNISTDataModule(128)
-#     datamodule.prepare_data()
-#     datamodule.setup()
-#
-#     dataloader = datamodule.train_dataloader()
-#     batch = next(iter(dataloader))
-#
-#     compare_with_hessian(net, optimizer, batch, "")
+def test3():
+    global additional_points_to_plot
+    global additional_grads_points
+
+    BATCH_SIZE = 256
+    datamodule = MNISTDataModule(BATCH_SIZE)
+    datamodule.prepare_data()
+    datamodule.setup()
+    dataloader = datamodule.train_dataloader()
+
+    param_list_to_plot = [
+        ("3.weight", (9, 9)),
+        ("7.weight", (9, 9)),
+    ]
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device: {device}")
+
+    for param_tuple in param_list_to_plot:
+        additional_grads_points[param_tuple] = []
+        additional_points_to_plot[param_tuple] = []
+
+    def pretrain(net, optim):
+        N_steps = 10
+        net.train()
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        data_iter = iter(dataloader)
+
+        for i in range(N_steps):
+            try:
+                x, y = next(data_iter)
+            except StopIteration:
+                data_iter = iter(dataloader)
+                x, y = next(data_iter)
+
+            x, y = x.to(device), y.to(device)
+
+            optim.zero_grad()
+            outputs = net(x)
+            loss = loss_fn(outputs, y)
+            
+            if i == N_steps - 1:
+                loss.backward(retain_graph=True)
+            else:
+                loss.backward()
+
+            if i % 2 == 0:
+                for param_tuple in param_list_to_plot:
+                    param_name, param_index = param_tuple
+                    additional_points_to_plot[(param_tuple)].append(
+                        (
+                            dict(net.named_parameters())[param_name][param_index].item(),
+                            loss.item(),
+                        )
+                    )
+                    additional_grads_points[(param_tuple)].append(
+                        (
+                            dict(net.named_parameters())[param_name][param_index].item(),
+                            dict(net.named_parameters())[param_name]
+                            .grad[param_index]
+                            .item(),
+                        )
+                    )
+
+            if i == N_steps - 1: 
+                break
+
+            optim.step()
+
+        return loss
+
+    net = get_mini_FC().to(device)
+    optim = dOGR(net.parameters(), beta=0.7)
+
+    batch = next(iter(dataloader))
+
+    run_and_plot(
+        net,
+        optim,
+        pretrain,
+        param_list_to_plot,
+        (batch[0].to(device), batch[1].to(device)),
+        [],
+    )
 
 
 if __name__ == "__main__":
-    test2()
-    # test3()
+    torch.manual_seed(42)
+    # test2()
+    test3()

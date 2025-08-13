@@ -177,7 +177,7 @@ class dOGR(Optimizer):
                 new_d_params_params,
                 new_d_grads_params,
             ) = _get_new_moving_average(
-                param=param[i],
+                param=param,
                 grad=grad,
                 beta=group["beta"],
                 mean_param=mean_params[i],
@@ -275,7 +275,7 @@ def dogr(
             new_d_params_params,
             new_d_grads_params,
         ) = _get_new_moving_average(
-            param=param[i],
+            param=param,
             grad=grad,
             beta=beta,
             mean_param=mean_params[i],
