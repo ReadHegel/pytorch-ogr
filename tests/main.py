@@ -18,6 +18,7 @@ def run(
     optimizer,
     name,
     version,
+    datamodule,
     max_epochs: int,
     batch_size: int,
 ):
@@ -26,7 +27,7 @@ def run(
         optimizer,
     )
 
-    datamodule = MNISTDataModule(batch_size=batch_size)
+    datamodule = datamodule
 
     logger = loggers.CSVLogger(
         str(LOGGING_DIR),
