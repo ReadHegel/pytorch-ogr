@@ -6,7 +6,7 @@ from torchvision.datasets import MNIST
 from torchvision.transforms import ToTensor
 import torch.utils.data as data
 from torch.utils.data import DataLoader
-
+from src.optim.dOGR import dOGR
 import os
 import time 
 
@@ -24,16 +24,68 @@ class TestLightningModule(L.LightningModule):
         super().__init__()
         self.net = net
         self.optimizer = optimizer
+        self.automatic_optimization = False
 
     def training_step(self, batch, batch_idx):
+        # Pobieramy główny optymalizator (dOGR lub inny)
+        optimizer = self.optimizers()
+
+        # Sprawdzamy, czy użyliśmy dOGR z polityką NN
+        is_nn_policy = isinstance(optimizer, dOGR) and getattr(optimizer, 'nn_policy', False)
+
         x, target = batch
-        pred = self.net(x)
+        x = x.to(self.device)
+        target = target.to(self.device)
 
-        loss = F.cross_entropy(pred, target)
+        if is_nn_policy:
+            # --- PĘTLA DLA dOGR Z POLITYKĄ NN (META-UCZENIE) ---
+            
+            # Pobieramy sieć-politykę i jej optymalizator
+            policy_net = optimizer.policy_net
+            policy_optimizer = optimizer.policy_optimizer
+            
+            # 1. Obliczamy stratę PRZED krokiem, aby mieć punkt odniesienia
+            with torch.no_grad():
+                loss_before = F.cross_entropy(self.net(x), target)
 
-        self.log_dict({
-            "train_loss": loss,
-        })
+            # 2. Obliczamy gradienty dla GŁÓWNEJ SIECI
+            optimizer.zero_grad()
+            pred = self.net(x)
+            loss = F.cross_entropy(pred, target)
+            self.manual_backward(loss)
+            
+            # 3. Wykonujemy krok GŁÓWNYM optymalizatorem. 
+            #    Metoda step() zmienia wagi modelu I ZWRACA podjęte akcje
+            actions = optimizer.step()
+            if actions is not None:
+                actions = actions.to(self.device)
+
+            # 4. Obliczamy stratę PO kroku, żeby zobaczyć efekt
+            with torch.no_grad():
+                loss_after = F.cross_entropy(self.net(x), target)
+            
+            # 5. Obliczamy nagrodę i stratę dla SIECI-POLITYKI
+            reward = (loss_before - loss_after).detach() # Odłączamy od grafu
+            policy_loss = -(actions * reward).mean() # Chcemy maksymalizować (akcja * nagroda)
+            
+            # 6. Trenujemy sieć-politykę
+            policy_optimizer.zero_grad()
+            # Używamy retain_graph=True, jeśli graf jest współdzielony, dla bezpieczeństwa
+            policy_loss.backward(retain_graph=True) 
+            policy_optimizer.step()
+
+        else:
+            # --- STANDARDOWA PĘTLA RĘCZNEJ OPTYMALIZACJI ---
+            pred = self.net(x)
+            loss = F.cross_entropy(pred, target)
+
+            optimizer.zero_grad()
+            self.manual_backward(loss)
+            self.clip_gradients(optimizer, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+            optimizer.step() # Wywołujemy standardowy krok
+
+        # Logujemy stratę i zwracamy ją
+        self.log("train_loss", loss, on_step=True, on_epoch=False, prog_bar=True)
         return loss
 
     def on_train_epoch_start(self): 

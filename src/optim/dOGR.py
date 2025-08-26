@@ -3,19 +3,24 @@ This file contains implementation of the diagonal OGR function
 optimalization algorithm from paper: https://arxiv.org/pdf/1901.11457
 """
 
-from typing import Union, Optional
+from typing import Union, Tuple, Callable
 
 import torch
 from torch.optim import Optimizer
 from torch.optim.optimizer import ParamsT, _use_grad_for_differentiable
 from torch import Tensor
-
+from .policy_net import PolicyNet
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 class dOGR(Optimizer):
     def __init__(
         self,
         params: ParamsT,
+        policy_net: PolicyNet,
+        policy_optimizer: Optimizer,
+        net: nn.Module,
         lr: Union[float, Tensor] = 1e-3,
         beta: float = 0.50,
         trust_factor: float = 1.0,
@@ -24,6 +29,7 @@ class dOGR(Optimizer):
         differentiable: bool = False,
         linear_clipping: bool = False,
         nonlinear_clipping: bool = False,
+        nn_policy: bool = False,
         var_clipping: bool = False,
         var_fixed: float = 1.0,
         p_norm: float = 2.0,
@@ -35,7 +41,6 @@ class dOGR(Optimizer):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
 
-
         defaults = {
             "lr": lr,
             "maximize": maximize,
@@ -45,6 +50,7 @@ class dOGR(Optimizer):
             "differentiable": differentiable,
             "linear_clipping": linear_clipping,
             "nonlinear_clipping": nonlinear_clipping,
+            "nn_policy": nn_policy,
             "var_clipping": var_clipping,
             "var_fixed": var_fixed,
             "p_norm": p_norm,
@@ -53,6 +59,10 @@ class dOGR(Optimizer):
         }
 
         super().__init__(params, defaults)
+        self.policy_net = policy_net
+        self.policy_optimizer = policy_optimizer
+        self.net = net
+        self.loss_fn = F.cross_entropy
 
     def _init_group(
         self,
@@ -129,6 +139,10 @@ class dOGR(Optimizer):
             dogr(
                 params,
                 grads,
+                main_net=self.net,
+                policy_net=self.policy_net,
+                policy_optimizer=self.policy_optimizer,
+                loss_fn=self.loss_fn,
                 lr=group["lr"],
                 beta=group["beta"],
                 trust_factor=group["trust_factor"],
@@ -141,6 +155,7 @@ class dOGR(Optimizer):
                 maximize=group["maximize"],
                 linear_clipping=group["linear_clipping"],
                 nonlinear_clipping=group["nonlinear_clipping"],
+                nn_policy=group["nn_policy"],
                 var_clipping=group["var_clipping"],
                 var_fixed=group["var_fixed"],
                 p_norm=group["p_norm"],
@@ -154,6 +169,10 @@ class dOGR(Optimizer):
 def dogr(
     params: list[Tensor],
     grads: list[Tensor],
+    main_net: nn.Module,
+    policy_net: PolicyNet,
+    policy_optimizer: Optimizer,
+    loss_fn: Callable[[Tensor, Tensor], Tensor],
     lr: float,
     beta: float,
     trust_factor: float,
@@ -166,6 +185,7 @@ def dogr(
     maximize: bool,
     linear_clipping: bool,
     nonlinear_clipping: bool,
+    nn_policy: bool,
     var_clipping: bool,
     var_fixed: float,
     p_norm: float,
@@ -241,6 +261,29 @@ def dogr(
                     )
                 ), alpha=trust_factor
             )
+
+        elif nn_policy:
+            # 1. Przygotuj wejście dla sieci-polityki
+            policy_input = torch.stack([
+                mean_grads[i].detach(),
+                H.detach(),
+                d_params_params[i].detach(),
+                d_grads_params[i].detach(),
+            ], dim=-1)
+            
+            # 2. Użyj sieci-polityki do wygenerowania decyzji (wielkości kroku)
+            # Przeskalowujemy wynik z Sigmoid (0,1) do sensownego zakresu, np. (0, 2)
+            learned_step_size = policy_net(policy_input).squeeze(-1) * 2.0 
+            
+            # 3. Zastosuj decyzję do obliczenia kroku
+            final_update = -learned_step_size * mean_grads[i]
+            
+            # 4. Wykonaj krok
+            param.add_(final_update)
+            
+            # 5. Zwróć podjętą "akcję", aby pętla treningowa mogła ją wykorzystać
+            # Zwracamy `learned_step_size`, a nie `final_update`, bo strata polityki zależy od samej decyzji
+            return learned_step_size
 
         elif var_clipping:
             normal_step = - (1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H))) * mean_grads[i]
