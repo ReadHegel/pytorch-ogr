@@ -8,8 +8,6 @@ from torch import optim
 import time
 import itertools
 
-# Zaimportuj reużywalne komponenty z Twoich skryptów
-# Upewnij się, że ten notebook jest w głównym folderze projektu
 from tests.main import run, net_dict
 from tests.datamodule import MNISTDataModule, CIFAR10DataModule, FashionMNISTDataModule
 from src.optim.dOGR import dOGR
@@ -71,24 +69,18 @@ def run_experiments_on_all_architectures():
     Uruchamia serie eksperymentów dla wszystkich zdefiniowanych architektur sieci
     i wszystkich zdefiniowanych zbiorów danych.
     """
-    # ZMIANA: Zewnętrzna pętla iterująca po sieciach ("FC", "LeNet")
     for net_name in net_dict.keys():
         print(f"\n{'='*25} ROZPOCZYNANIE TESTÓW DLA ARCHITEKTURY: {net_name.upper()} {'='*25}")
         
-        # Wewnętrzna pętla iterująca po zbiorach danych
         for dataset_name, datamodule_class in datamodules.items():
             print(f"\n{'--'*10} ZBIÓR DANYCH: {dataset_name.upper()} {'--'*10}")
             
-            # Tworzymy DataModule, aby uzyskać wymiary dla modelu
             dm = datamodule_class(batch_size=BATCH_SIZE)
             
-            # Nazwa eksperymentu zawiera teraz nazwę sieci i datasetu
             experiment_name = f"dOGR_vs_Adam_{net_name}_{dataset_name}"
             
-            # --- Uruchomienie eksperymentu dla dOGR ---
             print(f"\n--- Uruchamianie dOGR (wersja 'dogr_tuned') ---")
             torch.manual_seed(42)
-            # Dynamiczne tworzenie sieci z poprawnymi wymiarami
             net_dogr = net_dict[net_name](input_dims=dm.dims, num_classes=dm.num_classes)
             optimizer_dogr = dogr_config["opt"](net_dogr.parameters(), **dogr_config["args"])
             run(
@@ -96,7 +88,6 @@ def run_experiments_on_all_architectures():
                 datamodule=dm, max_epochs=MAX_EPOCHS, batch_size=BATCH_SIZE
             )
 
-            # --- Uruchomienie Grid Search dla Adama ---
             print(f"\n--- Uruchamianie Grid Search dla Adama ---")
             
             keys, values = zip(*adam_grid_search["grid"].items())
@@ -110,7 +101,6 @@ def run_experiments_on_all_architectures():
                 print(f"[{i+1}/{len(param_combinations)}] Adam z parametrami: {params}")
                 
                 torch.manual_seed(42)
-                # Dynamiczne tworzenie sieci z poprawnymi wymiarami
                 net_adam = net_dict[net_name](input_dims=dm.dims, num_classes=dm.num_classes)
                 optimizer_adam = adam_grid_search["opt"](net_adam.parameters(), **params)
                 
@@ -123,23 +113,17 @@ def run_experiments_on_all_architectures():
                 if log_path.exists():
                     df = pd.read_csv(log_path)
                     
-                    # Filtrujemy dane, aby usunąć ewentualne brakujące wartości
                     loss_df = df.dropna(subset=['epoch', 'train_loss'])
                     
                     if not loss_df.empty:
-                        # Znajdź numer ostatniej epoki
                         last_epoch = loss_df['epoch'].max()
                         
-                        # Wybierz dane z 5 ostatnich epok
                         last_5_epochs_df = loss_df[loss_df['epoch'] > last_epoch - 5]
                         
                         if not last_5_epochs_df.empty:
-                            # Oblicz średnią stratę i użyj jej jako metryki
                             avg_final_loss = last_5_epochs_df['train_loss'].mean()
                             adam_runs_results.append({'version': version_name, 'metric': avg_final_loss})
-                # ----------------------------------------------------------------------
 
-            # ZMIANA: Sortujemy po nowej metryce (im niższa strata, tym lepiej)
             adam_runs_results.sort(key=lambda x: x['metric'])
             top_5_adam = adam_runs_results[:5]
             
@@ -159,10 +143,8 @@ def plot_final_results():
     print("\n--- Generowanie wykresów porównawczych ---")
     plt.style.use('seaborn-v0_8-whitegrid')
 
-    # ZMIANA: Główna pętla iteruje teraz po zapisanych wynikach
     for result_key, result_data in best_results.items():
         
-        # Tworzymy nowy, osobny wykres dla każdej kombinacji
         fig, ax = plt.subplots(figsize=(12, 8))
         
         net_name, dataset_name = result_key.split('_', 1)
@@ -170,7 +152,6 @@ def plot_final_results():
         
         fig.suptitle(f"Porównanie na: {dataset_name} | Architektura: {net_name} ({MAX_EPOCHS} epok)", fontsize=16)
         
-        # 1. Wykres dla dOGR
         dogr_version = result_data["dogr_version"]
         dogr_log_path = LOGGING_DIR / experiment_name / dogr_version / "metrics.csv"
         if dogr_log_path.exists():
@@ -178,7 +159,6 @@ def plot_final_results():
             loss_dogr = df_dogr.dropna(subset=['train_loss']).groupby('epoch')['train_loss'].mean()
             ax.plot(loss_dogr.index, loss_dogr.values, "-", label=f"dOGR (dostrojony)", linewidth=2.5, color='red')
         
-        # 2. Wykresy dla 5 najlepszych Adamów
         top_5_adam = result_data["adam_top_5"]
         for adam_run in top_5_adam:
             adam_version = adam_run['version']
@@ -186,7 +166,6 @@ def plot_final_results():
             if adam_log_path.exists():
                 df_adam = pd.read_csv(adam_log_path)
                 loss_adam = df_adam.dropna(subset=['train_loss']).groupby('epoch')['train_loss'].mean()
-                # Używamy etykiety, aby pokazać parametry i wynik
                 label = f"{adam_version} (śr. strata: {adam_run['metric']:.4f})"
                 ax.plot(loss_adam.index, loss_adam.values, "-", label=label, alpha=0.7)
 
@@ -199,14 +178,11 @@ def plot_final_results():
         plots_dir = LOGGING_DIR / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
         
-        # 2. Stwórz unikalną nazwę pliku
         save_path = plots_dir / f"comparison_{result_key}.png"
         
-        # 3. Zapisz wykres w wysokiej rozdzielczości
         plt.savefig(save_path, dpi=300)
         print(f"Zapisano wykres w: {save_path}")
         
-        # 4. Zamknij figurę, aby zwolnić pamięć (ważne w pętlach)
         plt.close(fig)
 
 
