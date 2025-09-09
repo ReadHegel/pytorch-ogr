@@ -1,4 +1,4 @@
-print("In module products __package__, __name__ ==", __package__, __name__)
+#print("In module products __package__, __name__ ==", __package__, __name__)
 import torch
 import lightning as L
 import torch.nn.functional as F
@@ -8,87 +8,109 @@ import torch.utils.data as data
 from torch.utils.data import DataLoader
 from src.optim.dOGR import dOGR
 import os
-import time 
+import time
 
 
 SEED = 42
 DATADIR = "DATA"
 
 
+def _has_nn_policy(opt) -> bool:
+    return isinstance(opt, dOGR) and any(getattr(g, "get", lambda k, d=None: d)("nn_policy", False) if isinstance(g, dict) else g.get("nn_policy", False) for g in getattr(opt, "param_groups", []))
+
+
 class TestLightningModule(L.LightningModule):
-    def __init__(
-        self,
-        net,
-        optimizer,
-    ):
+    def __init__(self, net, optimizer):
         super().__init__()
         self.net = net
         self.optimizer = optimizer
+        # Ręczna optymalizacja
         self.automatic_optimization = False
+        # EMA baseline do stabilizacji REINFORCE
+        self.register_buffer("baseline", torch.tensor(0.0))
 
     def training_step(self, batch, batch_idx):
         # Pobieramy główny optymalizator (dOGR lub inny)
         optimizer = self.optimizers()
 
-        # Sprawdzamy, czy użyliśmy dOGR z polityką NN
-        is_nn_policy = isinstance(optimizer, dOGR) and getattr(optimizer, 'nn_policy', False)
+        is_nn_policy = _has_nn_policy(optimizer)
 
         x, target = batch
-        x = x.to(self.device)
-        target = target.to(self.device)
+        x = x.to(self.device, non_blocking=True)
+        target = target.to(self.device, non_blocking=True)
 
         if is_nn_policy:
-            # --- PĘTLA DLA dOGR Z POLITYKĄ NN (META-UCZENIE) ---
-            
-            # Pobieramy sieć-politykę i jej optymalizator
+            # --- PĘTLA DLA dOGR Z POLITYKĄ NN (REINFORCE) ---
             policy_net = optimizer.policy_net
             policy_optimizer = optimizer.policy_optimizer
-            
-            # 1. Obliczamy stratę PRZED krokiem, aby mieć punkt odniesienia
+
+            # Loss PRZED krokiem
             with torch.no_grad():
                 loss_before = F.cross_entropy(self.net(x), target)
 
-            # 2. Obliczamy gradienty dla GŁÓWNEJ SIECI
+            # Backprop dla sieci głównej
             optimizer.zero_grad()
             pred = self.net(x)
             loss = F.cross_entropy(pred, target)
             self.manual_backward(loss)
-            
-            # 3. Wykonujemy krok GŁÓWNYM optymalizatorem. 
-            #    Metoda step() zmienia wagi modelu I ZWRACA podjęte akcje
-            actions = optimizer.step()
-            if actions is not None:
-                actions = actions.to(self.device)
 
-            # 4. Obliczamy stratę PO kroku, żeby zobaczyć efekt
+            # Krok dOGR sterowany polityką → (actions, log_prob[, entropy])
+            out = optimizer.step()
+            if not (isinstance(out, tuple) and len(out) in (2, 3)):
+                raise RuntimeError("dOGR.step() musi zwracać (actions, log_prob[, entropy]) dla gałęzi nn_policy.")
+
+            if len(out) == 2:
+                actions, log_prob = out
+                entropy = None
+            else:
+                actions, log_prob, entropy = out
+
+            # Loss PO kroku
             with torch.no_grad():
                 loss_after = F.cross_entropy(self.net(x), target)
-            
-            # 5. Obliczamy nagrodę i stratę dla SIECI-POLITYKI
-            reward = (loss_before - loss_after).detach() # Odłączamy od grafu
-            policy_loss = -(actions * reward).mean() # Chcemy maksymalizować (akcja * nagroda)
-            
-            # 6. Trenujemy sieć-politykę
+
+            # REINFORCE: policy_loss = - log_prob * advantage  (+ opcjonalny entropy bonus)
+            reward = (loss_before - loss_after).detach()
+            # Aktualizacja EMA baseline
+            self.baseline = 0.9 * self.baseline + 0.1 * reward.mean()
+            # Standaryzacja i sprowadzenie do SKALARA
+            adv = reward - self.baseline
+            if adv.numel() > 1:
+                adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
+            advantage = adv.mean()
+
+            # log_prob to skalar
+            policy_loss = -(log_prob * advantage)
+            if entropy is not None:
+                policy_loss = policy_loss - 1e-3 * entropy
+
+            # Update polityki
             policy_optimizer.zero_grad()
-            # Używamy retain_graph=True, jeśli graf jest współdzielony, dla bezpieczeństwa
-            policy_loss.backward(retain_graph=True) 
+            self.manual_backward(policy_loss)
+            torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
             policy_optimizer.step()
 
+            # Logi diagnostyczne
+            self.log("policy_loss", policy_loss, on_step=True, prog_bar=True)
+            self.log("advantage", advantage, on_step=True, prog_bar=False)
+            self.log("reward", reward.mean(), on_step=True, prog_bar=False)
+            self.log("loss_after", loss_after, on_step=True, prog_bar=False)
+
         else:
-            # --- STANDARDOWA PĘTLA RĘCZNEJ OPTYMALIZACJI ---
+            # --- STANDARDOWA PĘTLA  OPTYMALIZACJI ---
             pred = self.net(x)
             loss = F.cross_entropy(pred, target)
 
             optimizer.zero_grad()
             self.manual_backward(loss)
             self.clip_gradients(optimizer, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
-            optimizer.step() # Wywołujemy standardowy krok
+            optimizer.step()
 
-        # Logujemy stratę i zwracamy ją
+        # Log straty
         self.log("train_loss", loss, on_step=True, on_epoch=False, prog_bar=True)
         return loss
 
-    def on_train_epoch_start(self): 
+    def on_train_epoch_start(self):
         self.epoch_start_time = time.time()
 
     def on_train_epoch_end(self):
@@ -97,8 +119,10 @@ class TestLightningModule(L.LightningModule):
 
     def test_step(self, batch, batch_index):
         x, target = batch
-        pred = self.net(x)
+        x = x.to(self.device, non_blocking=True)
+        target = target.to(self.device, non_blocking=True)
 
+        pred = self.net(x)
         loss = F.cross_entropy(pred, target)
         accuracy = (target == torch.argmax(pred, dim=1)).float().mean() * 100
 
@@ -106,8 +130,10 @@ class TestLightningModule(L.LightningModule):
 
     def validation_step(self, batch, batch_index):
         x, target = batch
-        pred = self.net(x)
+        x = x.to(self.device, non_blocking=True)
+        target = target.to(self.device, non_blocking=True)
 
+        pred = self.net(x)
         loss = F.cross_entropy(pred, target)
         accuracy = (target == torch.argmax(pred, dim=1)).float().mean() * 100
 
