@@ -33,7 +33,7 @@ nets = {
 # 1) Konfiguracja dOGR
 dogr_config = {
     "lr": 1e-3,
-    "nonlinear_clipping": True,
+    "nonlinear_clipping": False,
     "p_norm": 0.57,
     "p_eps": 10.77,
     "beta": 0.1,
@@ -41,7 +41,7 @@ dogr_config = {
     "nn_policy": True,
     "policy_std": 0.1,
     "init_as_zeros": False,
-    "differentiable": False,
+    "differentiable": True,
 }
 
 def build_dogr_optimizer(net: torch.nn.Module) -> optim.Optimizer:

@@ -283,10 +283,15 @@ def dogr(
                 d_grads_params[i].detach(),
             )
 
+            target_device = next(policy_net.parameters()).device
+            policy_input = policy_input.to(target_device)
+
             # 1) Compute policy WITH grads (even though outer step may be in no_grad)
             with torch.enable_grad():
                 mu = policy_net(policy_input).squeeze(-1)  # raw mu (last layer must be linear)
-                dist = Normal(loc=mu, scale=torch.as_tensor(policy_std, device=mu.device, dtype=mu.dtype))
+                std_dev = torch.full_like(mu, policy_std)
+                dist = Normal(loc=mu, scale=std_dev)
+
                 z = dist.rsample()
                 action = 2.0 * torch.sigmoid(z)  # (0, 2)
 
@@ -302,8 +307,9 @@ def dogr(
 
             # 2) Apply update to parameters WITHOUT grads (avoid in-place on leaf requiring grad)
             with torch.no_grad():
-                final_update = -action * mean_grads[i]
-                param.add_(final_update, alpha=trust_factor)
+                mean_grads_on_device = mean_grads[i].to(action.device)
+                final_update = -action * mean_grads_on_device
+                param.add_(final_update.to(param.device), alpha=trust_factor)
 
             # 3) Accumulate diagnostics
             actions_accum.append(action_param)     # scalar
