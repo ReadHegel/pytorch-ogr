@@ -1,5 +1,5 @@
 """
-This file contains implementation of the diagonal OGR function
+This file contains implementation of the diagonal OGR function (dOGR)
 optimalization algorithm from paper: https://arxiv.org/pdf/1901.11457
 """
 
