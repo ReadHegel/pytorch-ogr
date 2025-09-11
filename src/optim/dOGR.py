@@ -52,8 +52,11 @@ class dOGR(Optimizer):
             raise ValueError("Tensor lr must be 1-element")
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
+<<<<<<< HEAD
         if policy_std <= 0.0:
             raise ValueError("policy_std must be > 0")
+=======
+>>>>>>> origin/master
 
         defaults = {
             "lr": lr,
@@ -89,7 +92,7 @@ class dOGR(Optimizer):
         mean_grads: list[Tensor],
         d_params_params: list[Tensor],
         d_grads_params: list[Tensor],
-        mean: list[Tensor],
+        means: list[Tensor],
     ):
         has_sparse_grad = False
 
@@ -104,6 +107,7 @@ class dOGR(Optimizer):
 
             # Lazy state initialization
             if len(state) == 0:
+<<<<<<< HEAD
                 if group.get("init_as_zeros", True):
                     # Legacy: start from zeros
                     def init_as_zero(name: str):
@@ -124,12 +128,25 @@ class dOGR(Optimizer):
                     state["d_grads_params"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     # start counter from 1 to reduce cold-start bias
                     state["mean"] = torch.ones_like(p, memory_format=torch.preserve_format)
+=======
+
+                def init_as_zero(name: str):
+                    state[name] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
+
+                init_as_zero("mean_params")
+                init_as_zero("mean_grads")
+                init_as_zero("d_params_params")
+                init_as_zero("d_grads_params")
+                init_as_zero("means")
+>>>>>>> origin/master
 
             mean_params.append(state["mean_params"])
             mean_grads.append(state["mean_grads"])
             d_params_params.append(state["d_params_params"])
             d_grads_params.append(state["d_grads_params"])
-            mean.append(state["mean"])
+            means.append(state["means"])
 
         return has_sparse_grad
 
@@ -151,7 +168,7 @@ class dOGR(Optimizer):
             mean_grads: list[Tensor] = []
             d_params_params: list[Tensor] = []
             d_grads_params: list[Tensor] = []
-            mean: list[Tensor] = []
+            means: list[Tensor] = []
 
             self._init_group(
                 group=group,
@@ -161,7 +178,7 @@ class dOGR(Optimizer):
                 mean_grads=mean_grads,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
-                mean=mean,
+                means=means,
             )
 
             result = dogr(
@@ -179,7 +196,7 @@ class dOGR(Optimizer):
                 mean_grads=mean_grads,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
-                mean=mean,
+                means=means,
                 maximize=group["maximize"],
                 linear_clipping=group["linear_clipping"],
                 nonlinear_clipping=group["nonlinear_clipping"],
@@ -192,6 +209,7 @@ class dOGR(Optimizer):
                 policy_std=group["policy_std"],
             )
 
+<<<<<<< HEAD
             if result is not None:
                 a, lp, ent = result
                 actions_list.append(a)
@@ -212,6 +230,128 @@ def _safe_stack(*tensors: Tensor) -> Tensor:
     dev = tensors[0].device
     tensors = [t.to(dev) for t in tensors]
     return torch.stack(tensors, dim=-1)
+=======
+            for p, mean_param, mean_grad, d_pp, d_gp, mean in zip(
+                params, mean_params, mean_grads, d_params_params, d_grads_params, means
+            ):
+                state = self.state[p]
+                state["mean_params"] = mean_param
+                state["mean_grads"] = mean_grad
+                state["d_params_params"] = d_pp
+                state["d_grads_params"] = d_gp
+                state["means"] = mean 
+
+        return loss
+>>>>>>> origin/master
+
+    def get_hessian(self):
+        if len(self.param_groups) > 1:
+            raise ValueError("Can't get the hessian with more then one group")
+
+        group = next(iter(self.param_groups))
+
+        params: list[Tensor] = []
+        grads: list[Tensor] = []
+        mean_params: list[Tensor] = []
+        mean_grads: list[Tensor] = []
+        d_params_params: list[Tensor] = []
+        d_grads_params: list[Tensor] = []
+        means: list[Tensor] = []
+
+        _ = self._init_group(
+            group=group,
+            params=params,
+            grads=grads,
+            mean_params=mean_params,
+            mean_grads=mean_grads,
+            d_params_params=d_params_params,
+            d_grads_params=d_grads_params,
+            means=means,
+        )
+
+        Hs = []
+
+        for i, param in enumerate(params):
+            grad = grads[i] if not group["maximize"] else -grads[i]
+
+            (
+                _,
+                _,
+                _,
+                new_d_params_params,
+                new_d_grads_params,
+            ) = _get_new_moving_average(
+                param=param,
+                grad=grad,
+                beta=group["beta"],
+                mean_param=mean_params[i],
+                mean_grad=mean_grads[i],
+                d_params_param=d_params_params[i],
+                d_grads_param=d_grads_params[i],
+                mean=means[i],
+            )
+
+            # Diagonal Hessian
+            H, _ = _get_hessian(
+                d_params_param=new_d_params_params,
+                d_grads_param=new_d_grads_params,
+                eps=group["eps"],
+            )
+            Hs.append(H)
+
+        return Hs
+
+
+def _get_new_moving_average(
+    param: Tensor,
+    grad: Tensor,
+    beta: float,
+    mean_param: Tensor,
+    mean_grad: Tensor,
+    d_params_param: Tensor,
+    d_grads_param: Tensor,
+    mean: Tensor,
+):
+    # Calculate means
+    # In comments we include the formulas with symbols coresponing
+    # to ones used in the paper https://arxiv.org/pdf/1901.11457
+
+    # mean_theta = beta * theta + (1 - beta) mean_theta
+    local_mean_params = mean_param + beta * (param - mean_param)
+
+    # mean_g = beta * g + (1 - beta) * g
+    local_mean_grads = mean_grad + beta * (grad - mean_grad)
+
+    local_mean = mean * beta + 1
+
+    # d_theta_theta = (1 - beta) * theta_hat_mean**2 + beta * theta_hat**2
+    local_d_params_params = d_params_param + beta * (
+        (param - local_mean_params) ** 2 - d_params_param
+    )
+
+    # d_g_theta = (1 - beta) * d_g_theta + beta * g_hat_theta_hat
+    local_d_grads_params = d_grads_param + beta * (
+        (grad - local_mean_grads) * (param - local_mean_params) - d_grads_param
+    )
+
+    return (
+        local_mean_params,
+        local_mean_grads,
+        local_mean,
+        local_d_params_params,
+        local_d_grads_params,
+    )
+
+
+def _get_hessian(
+    d_params_param: Tensor,
+    d_grads_param: Tensor,
+    eps: float,
+):
+    H_sign = torch.sign(d_grads_param)
+    H = d_grads_param / (d_params_param + eps)
+
+    return H, H_sign
 
 
 def dogr(
@@ -229,7 +369,7 @@ def dogr(
     mean_grads: list[Tensor],
     d_params_params: list[Tensor],
     d_grads_params: list[Tensor],
-    mean: list[Tensor],
+    means: list[Tensor],
     maximize: bool,
     linear_clipping: bool,
     nonlinear_clipping: bool,
@@ -249,6 +389,7 @@ def dogr(
     for i, param in enumerate(params):
         grad = grads[i] if not maximize else -grads[i]
 
+<<<<<<< HEAD
         # --- Running means / stats ---
         mean_params[i] += beta * (param - mean_params[i])          # mean_theta
         mean_grads[i]  += beta * (grad  - mean_grads[i])           # mean_g
@@ -260,6 +401,37 @@ def dogr(
         # Diagonal Hessian proxy
         H_sign = torch.sign(d_grads_params[i])
         H = d_grads_params[i] / (d_params_params[i] + eps)
+=======
+        (
+            new_mean_params,
+            new_mean_grads,
+            new_mean,
+            new_d_params_params,
+            new_d_grads_params,
+        ) = _get_new_moving_average(
+            param=param,
+            grad=grad,
+            beta=beta,
+            mean_param=mean_params[i],
+            mean_grad=mean_grads[i],
+            d_params_param=d_params_params[i],
+            d_grads_param=d_grads_params[i],
+            mean=means[i],
+        )
+
+        mean_params[i] = new_mean_params
+        mean_grads[i] = new_mean_grads
+        d_params_params[i] = new_d_params_params
+        d_grads_params[i] = new_d_grads_params
+        means[i] = new_mean
+
+        # Diagonal Hessian
+        H, H_sign = _get_hessian(
+            d_params_param=d_params_params[i],
+            d_grads_param=d_grads_params[i],
+            eps=eps,
+        )
+>>>>>>> origin/master
 
         if linear_clipping:
             normal_step = -(1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H))) * mean_grads[i]
@@ -322,6 +494,7 @@ def dogr(
                 torch.where(
                     H_sign == 0,
                     -grad * lr,
+<<<<<<< HEAD
                     -1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H)) * mean_grads[i],
                 ),
             )
@@ -338,3 +511,38 @@ def dogr(
         return actions_agg, logprob_agg, entropy_agg
 
     return None
+=======
+                    -1
+                    / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H))
+                    * mean_grads[i],
+                ),
+            )
+        else:
+            normal_step = (
+                -(1 / torch.maximum(torch.abs(H) * 1.5, 5 * torch.ones_like(H)))
+                * mean_grads[i]
+            )
+            aggressive_clip_step = (
+                -(
+                    1
+                    / torch.maximum(
+                        torch.abs(H) * 1.5, neg_clip_val * torch.ones_like(H)
+                    )
+                )
+                * mean_grads[i]
+            )
+
+            param.add_(
+                torch.where(
+                    H > 0,
+                    normal_step,
+                    torch.where(H < 0, aggressive_clip_step, -grad * lr),
+                )
+            )
+
+        # for debug
+        if torch.isnan(param).any():
+            raise RuntimeError(
+                "Wykryto wartość NaN w parametrach - trening jest niestabilny."
+            )
+>>>>>>> origin/master
