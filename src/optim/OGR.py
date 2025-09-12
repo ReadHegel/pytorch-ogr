@@ -16,7 +16,11 @@ def flat_params(params: list[Tensor]):
     ]) 
 
 def param_restore_size(flat_params, params_sizes, params_shapes):
+    # print(flat_params.shape)
+    # print(params_shapes)
+    # print(params_sizes)
     splited = torch.split(flat_params, params_sizes)
+    # print(splited[0].shape)
     return [s.view(shape) for s, shape in zip(splited, params_shapes)]
 
 class OGR(Optimizer):
@@ -74,11 +78,11 @@ class OGR(Optimizer):
             group["first_time"] = True 
         
             group["params_size"] = [param.numel() for param in params]
-            group["params_shape"] = [param.shape() for param in params]
+            group["params_shape"] = [param.shape for param in params]
         
             group["mean_params"] = torch.zeros_like(params_flat)
             group["mean_grads"] = torch.zeros_like(params_flat)
-            group["mean"] = torch.zeros_like(params_flat)
+            group["mean"] = 0
             group["d_params_params"] = torch.zeros((size, size))
             group["d_grads_params"] = torch.zeros((size, size))
 
@@ -109,6 +113,8 @@ class OGR(Optimizer):
                 group=group
             )
 
+            # print(params.shape)
+
             update_values = ogr(
                 params,
                 grads,
@@ -129,7 +135,7 @@ class OGR(Optimizer):
             update_values = param_restore_size(update_values, group["params_size"], group["params_shape"])
 
             for p, update_value in zip(group["params"], update_values):
-                p._add(update_value)
+                p.data.add_(update_value)
 
         return loss
 
@@ -200,7 +206,7 @@ def _get_new_moving_average(
     mean_grad: Tensor,
     d_params_param: Tensor,
     d_grads_param: Tensor,
-    mean: Tensor,
+    mean: float,
 ):
     if first_time: 
         beta = 1
@@ -239,16 +245,22 @@ def _get_new_moving_average(
 def _get_hessian(
     mean_params: Tensor, 
     mean_grads: Tensor,
-    mean: Tensor,
+    mean: float,
     d_params_param: Tensor,
     d_grads_param: Tensor,
     eps: float,
 ):
 
-    A = (mean * d_grads_param).unsqueeze(1) - mean_grads.unsqueeze(1) @ mean_params.unsqueeze(0)
-    B = (mean * d_params_param).unsqueeze(1) - mean_params.unsqeeze(1) @ mean_params.unsqeeze(0)
+    # print((mean * d_grads_param).shape)
+    A = (mean * d_grads_param) - mean_grads.unsqueeze(1) @ mean_params.unsqueeze(0)
+    B = (mean * d_params_param) - mean_params.unsqueeze(1) @ mean_params.unsqueeze(0)
 
-    H_inv = B @ torch.inverse(A)
+    # print(A)
+    # print(A.shape)
+    # print(B)
+    # print(B.shape)
+
+    H_inv = B @ torch.inverse(A + torch.diag(torch.ones(A.shape[0]) * eps))
     H = A @ torch.inverse(B)
 
     return H, H_inv
@@ -265,7 +277,7 @@ def ogr(
     mean_grads: Tensor,
     d_params_params: Tensor,
     d_grads_params: Tensor,
-    means: Tensor,
+    means: float,
     maximize: bool,
     hybrid_clipping: bool,
     neg_clip_val: Optional[float],
@@ -307,12 +319,12 @@ def ogr(
 
     # Może można tu zamiast mean_grads dać gradienty z ADAM-a 
     # TODO napisać to satabilniej bez używania inverse
-    p = (mean_params - H_inv * mean_grads) / means
+    p = (mean_params - H_inv @ mean_grads) / means
 
-    L, V = torch.linalg.eig((H + H.T) / 2)
+    L, V = torch.linalg.eigh((H + H.T) / 2)
 
-    update_values = lr * V @ torch.diag(torch.sign(L)) @ V.T (params_flat - p)
-    
+    update_values = lr * V @ torch.diag(torch.abs(L)) @ V.T @ (params_flat - p)
+
     # for debug
     if torch.isnan(params_flat).any():
         raise RuntimeError(

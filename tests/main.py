@@ -3,12 +3,13 @@ from argparse import ArgumentParser
 from torch import optim
 import lightning as L
 import lightning.pytorch.loggers as loggers
-from .nets import get_FC, get_LeNet
+from .nets import get_FC, get_LeNet, get_very_mini_net
 from .trainloop import TestLightningModule, fit_and_test
 from .datamodule import MNISTDataModule
 from pathlib import Path
 
 from src.optim.dOGR import dOGR
+from src.optim.OGR import OGR
 
 LOGGING_DIR = Path(__file__).parent.parent / "logs"
 
@@ -56,10 +57,14 @@ optimizer_dict = {
     "dOGR": {
         "opt": dOGR,
         "args": {},
-    }
+    },
+    "OGR": {
+        "opt": OGR,
+        "args": {},
+    },
 }
 
-net_dict = {"FC": get_FC, "LeNet": get_LeNet}
+net_dict = {"FC": get_FC, "LeNet": get_LeNet, "very_mini": get_very_mini_net, }
 
 def main():
     parser = ArgumentParser()

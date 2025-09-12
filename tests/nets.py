@@ -11,6 +11,18 @@ def get_FC():
         nn.Linear(64, 10),
     )
 
+def get_very_mini_net(): 
+    return nn.Sequential(
+        nn.Conv2d(1, 1, kernel_size=2, stride=2),
+        nn.ReLU(),
+        nn.Conv2d(1, 1, kernel_size=2, stride=2),
+        nn.ReLU(),
+        nn.Conv2d(1, 1, kernel_size=2, stride=2),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(3 * 3, 10),
+    )
+
 def get_mini_FC(): 
     return nn.Sequential(
         nn.Conv2d(1, 2, kernel_size=2, stride=2),
