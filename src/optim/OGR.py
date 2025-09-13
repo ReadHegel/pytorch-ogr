@@ -6,6 +6,7 @@ optimalization algorithm from paper: https://arxiv.org/pdf/1901.11457
 from typing import Union, Optional
 
 import torch
+from torch.func import grad
 from torch.optim import Optimizer
 from torch.optim.optimizer import ParamsT, _use_grad_for_differentiable
 from torch import Tensor
@@ -16,11 +17,11 @@ def flat_params(params: list[Tensor]):
     ]) 
 
 def param_restore_size(flat_params, params_sizes, params_shapes):
-    # print(flat_params.shape)
-    # print(params_shapes)
-    # print(params_sizes)
+    # # print(flat_params.shape)
+    # # print(params_shapes)
+    # # print(params_sizes)
     splited = torch.split(flat_params, params_sizes)
-    # print(splited[0].shape)
+    # # print(splited[0].shape)
     return [s.view(shape) for s, shape in zip(splited, params_shapes)]
 
 class OGR(Optimizer):
@@ -29,7 +30,7 @@ class OGR(Optimizer):
         params: ParamsT,
         lr: Union[float, Tensor] = 1e-3,
         beta: float = 0.50,
-        eps: float = 1e-8,
+        eps: float = 1e-12,
         maximize: bool = False,
         differentiable: bool = False,
         hybrid_clipping: bool = False,
@@ -72,6 +73,7 @@ class OGR(Optimizer):
 
         params_flat = flat_params(params)
         grads_flat = flat_params(grads)
+        # print("__init_group: ", torch.isnan(grads_flat).any())
         size = params_flat.shape[0]
 
         if "first_time" not in group: 
@@ -91,6 +93,11 @@ class OGR(Optimizer):
 
         return has_sparse_grad, params_flat, grads_flat, group["mean_params"], group["mean_grads"], group["mean"], group["d_params_params"], group["d_grads_params"], group["first_time"]
 
+    def _save_to_group(self, group, **kwargs):
+        for key, value in kwargs.items():
+            group[key] = value
+        return group
+
     @_use_grad_for_differentiable
     def step(self, closure=None) -> Union[None, float]:
         loss: Union[None, float] = None
@@ -106,16 +113,19 @@ class OGR(Optimizer):
             grads, \
             mean_params, \
             mean_grads, \
-            mean, \
+            means, \
             d_params_params, \
             d_grads_params, \
             first_time = self._init_group(
                 group=group
             )
 
-            # print(params.shape)
+            # # print(params.shape)
 
-            update_values = ogr(
+            update_values, mean_params, \
+            mean_grads, d_params_params, \
+            d_grads_params, means \
+            = ogr(
                 params,
                 grads,
                 first_time=first_time,
@@ -126,7 +136,7 @@ class OGR(Optimizer):
                 mean_grads=mean_grads,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
-                means=mean,
+                means=means, 
                 maximize=group["maximize"],
                 hybrid_clipping=group["hybrid_clipping"],
                 neg_clip_val=group["neg_clip_val"],
@@ -134,67 +144,18 @@ class OGR(Optimizer):
 
             update_values = param_restore_size(update_values, group["params_size"], group["params_shape"])
 
+            self._save_to_group(
+                group,
+                mean_params=mean_params,
+                mean_grads=mean_grads,
+                d_params_params=d_params_params,
+                d_grads_params=d_grads_params,
+                means=means,
+            )
             for p, update_value in zip(group["params"], update_values):
                 p.data.add_(update_value)
 
         return loss
-
-    # def get_hessian(self):
-    #     if len(self.param_groups) > 1:
-    #         raise ValueError("Can't get the hessian with more then one group")
-    #
-    #     group = next(iter(self.param_groups))
-    #
-    #     params: list[Tensor] = []
-    #     grads: list[Tensor] = []
-    #     mean_params: list[Tensor] = []
-    #     mean_grads: list[Tensor] = []
-    #     d_params_params: list[Tensor] = []
-    #     d_grads_params: list[Tensor] = []
-    #     means: list[Tensor] = []
-    #
-    #     _ = self._init_group(
-    #         group=group,
-    #         params=params,
-    #         grads=grads,
-    #         mean_params=mean_params,
-    #         mean_grads=mean_grads,
-    #         d_params_params=d_params_params,
-    #         d_grads_params=d_grads_params,
-    #         means=means,
-    #     )
-    #
-    #     Hs = []
-    #
-    #     for i, param in enumerate(params):
-    #         grad = grads[i] if not group["maximize"] else -grads[i]
-    #
-    #         (
-    #             _,
-    #             _,
-    #             _,
-    #             new_d_params_params,
-    #             new_d_grads_params,
-    #         ) = _get_new_moving_average(
-    #             param=param,
-    #             grad=grad,
-    #             beta=group["beta"],
-    #             mean_param=mean_params[i],
-    #             mean_grad=mean_grads[i],
-    #             d_params_param=d_params_params[i],
-    #             d_grads_param=d_grads_params[i],
-    #             mean=means[i],
-    #         )
-    #
-    #         # Diagonal Hessian
-    #         H, _ = _get_hessian(
-    #             d_params_param=new_d_params_params,
-    #             d_grads_param=new_d_grads_params,
-    #             eps=group["eps"],
-    #         )
-    #         Hs.append(H)
-    #
-    #     return Hs
 
 
 def _get_new_moving_average(
@@ -216,9 +177,14 @@ def _get_new_moving_average(
     # to ones used in the paper https://arxiv.org/pdf/1901.11457
 
     # mean_theta = beta * theta + (1 - beta) mean_theta
+    # print("in new arerage params", mean_param,
+          # torch.isnan(mean_param).any(), param, torch.isnan(param).any())
+
     local_mean_params = mean_param + beta * (param - mean_param)
 
     # mean_g = beta * g + (1 - beta) * g
+    # print("in new average", mean_grad,
+          # torch.isnan(mean_grad).any(), grad, torch.isnan(grad).any())
     local_mean_grads = mean_grad + beta * (grad - mean_grad)
 
     local_mean = mean * beta + 1
@@ -251,19 +217,30 @@ def _get_hessian(
     eps: float,
 ):
 
-    # print((mean * d_grads_param).shape)
-    A = (mean * d_grads_param) - mean_grads.unsqueeze(1) @ mean_params.unsqueeze(0)
-    B = (mean * d_params_param) - mean_params.unsqueeze(1) @ mean_params.unsqueeze(0)
+    size = mean_params.shape[0]
 
-    # print(A)
-    # print(A.shape)
-    # print(B)
-    # print(B.shape)
+    # print("mean_grads, mean_params", mean_grads, mean_params)
+    A = d_params_param - mean_params.unsqueeze(1) @ mean_params.unsqueeze(0)
+    B = d_grads_param + d_grads_param.T 
+    # print("A in fu", A)
+    A = A + A.T
 
-    H_inv = B @ torch.inverse(A + torch.diag(torch.ones(A.shape[0]) * eps))
-    H = A @ torch.inverse(B)
+    L, O = torch.linalg.eigh(A)
 
-    return H, H_inv
+    # print("L in fu", L, torch.min(L))
+
+    H = O @ (O.T @ B @ O) / \
+        (   
+            L.unsqueeze(0).expand(size,size) + 
+            L.unsqueeze(1).expand(size,size) 
+            # torch.maximum(
+            #     L.unsqueeze(0).expand(size,size) + 
+            #     L.unsqueeze(1).expand(size,size), 
+            #     torch.ones((size,size)) * eps
+            # )
+        ) @ O.T
+
+    return H
 
 
 def ogr(
@@ -308,7 +285,7 @@ def ogr(
     d_grads_params = new_d_grads_params
     means = new_mean
 
-    H, H_inv = _get_hessian(
+    H = _get_hessian(
         mean_params,
         mean_grads, 
         means,
@@ -317,13 +294,35 @@ def ogr(
         eps=eps,
     )
 
-    # Może można tu zamiast mean_grads dać gradienty z ADAM-a 
-    # TODO napisać to satabilniej bez używania inverse
-    p = (mean_params - H_inv @ mean_grads) / means
+    # print("H", H)
 
-    L, V = torch.linalg.eigh((H + H.T) / 2)
+    L, Q = torch.linalg.eigh(H)
 
-    update_values = lr * V @ torch.diag(torch.abs(L)) @ V.T @ (params_flat - p)
+    # print("L, Q", L, Q)
+    #
+    # print("max grad", torch.max(torch.abs(mean_grads)))
+    # print("max Q", torch.max(torch.abs(Q)))
+    update_values = - (1 / 1.5) * Q @ (
+            torch.diag(
+                1 / torch.maximum(torch.ones_like(L) * 20, torch.abs(L))
+            )
+        ) @ Q.T @ mean_grads 
+   
+    # print(
+    #     "L", L,
+    #     torch.maximum(torch.ones_like(L) * 10, torch.abs(L))
+    # )
+    # print(
+    # )
+    # print("max update values", torch.max(torch.abs(update_values)))
+    
+    # update_values = torch.clip(
+    #     update_values, 
+    #     min = -2,
+    #     max = 2,
+    # )
+
+    # print("update_values", update_values)
 
     # for debug
     if torch.isnan(params_flat).any():
@@ -331,5 +330,7 @@ def ogr(
             "Wykryto wartość NaN w parametrach - trening jest niestabilny."
         )
 
-    return update_values
+    return update_values, mean_params, \
+            mean_grads, d_params_params, \
+            d_grads_params, means
    

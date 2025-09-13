@@ -2,10 +2,21 @@ import lightning.pytorch as pl
 import torch
 from torchvision import transforms
 from torchvision.datasets import MNIST
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Dataset
 from pathlib import Path
         
 PATH_DATASETS = str(Path(__file__).parent.parent / "DATA")
+
+class ZeroTargetDataset(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        x, y = self.dataset[idx]
+        return x, y%2 
 
 class MNISTDataModule(pl.LightningDataModule):
     def __init__(self, batch_size, data_dir: str = PATH_DATASETS):
@@ -49,3 +60,16 @@ class MNISTDataModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         return DataLoader(self.mnist_test, batch_size=self.batch_size, num_workers=4)
+
+class ZEROMNISTDataModule(MNISTDataModule):
+    def setup(self, stage=None):
+        # najpierw normalna logika z klasy bazowej
+        super().setup(stage)
+
+        # podmieniamy targety na zero
+        if stage == "fit" or stage is None:
+            self.mnist_train = ZeroTargetDataset(self.mnist_train)
+            self.mnist_val = ZeroTargetDataset(self.mnist_val)
+
+        if stage == "test" or stage is None:
+            self.mnist_test = ZeroTargetDataset(self.mnist_test)

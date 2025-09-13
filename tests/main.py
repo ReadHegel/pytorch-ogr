@@ -1,11 +1,11 @@
 print("In module products __package__, __name__ ==", __package__, __name__)
-from argparse import ArgumentParser
+from argparse import ArgumentError, ArgumentParser
 from torch import optim
 import lightning as L
 import lightning.pytorch.loggers as loggers
 from .nets import get_FC, get_LeNet, get_very_mini_net
 from .trainloop import TestLightningModule, fit_and_test
-from .datamodule import MNISTDataModule
+from .datamodule import MNISTDataModule, ZEROMNISTDataModule
 from pathlib import Path
 
 from src.optim.dOGR import dOGR
@@ -18,6 +18,7 @@ def run(
     net,
     optimizer,
     name,
+    datamodule,
     version,
     max_epochs: int,
     batch_size: int,
@@ -27,7 +28,6 @@ def run(
         optimizer,
     )
 
-    datamodule = MNISTDataModule(batch_size=batch_size)
 
     logger = loggers.CSVLogger(
         str(LOGGING_DIR),
@@ -85,6 +85,9 @@ def main():
     parser.add_argument(
         "--name", type=str, default="default_name", help="Name of the experiment"
     )
+    parser.add_argument(
+        "--data", type=str, default="MNIST", help="Name the data"
+    )
 
     args = parser.parse_args()
 
@@ -92,10 +95,19 @@ def main():
     optimizer = optimizer_dict[args.optimizer]["opt"](
         net.parameters(), **(optimizer_dict[args.optimizer]["args"])
     )
-
+    
+    datamodule = None
+    if args.data == "MNIST": 
+        datamodule = MNISTDataModule(batch_size=args.batch_size)
+    elif args.data == "ZERO": 
+        datamodule = ZEROMNISTDataModule(batch_size=args.batch_size)
+    else: 
+        raise ValueError("data needs to be one of MNIST ZERO")
+    
     run(
         net,
         optimizer,
+        datamodule=datamodule,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         version=args.version,
