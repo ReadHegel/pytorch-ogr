@@ -249,13 +249,16 @@ def dogr(
     for i, param in enumerate(params):
         grad = grads[i] if not maximize else -grads[i]
 
+        param_detached = param.detach()
+        grad_detached = grad.detach()
+
         # --- Running means / stats ---
-        mean_params[i] += beta * (param - mean_params[i])          # mean_theta
-        mean_grads[i]  += beta * (grad  - mean_grads[i])           # mean_g
+        mean_params[i] += beta * (param_detached - mean_params[i])          # mean_theta
+        mean_grads[i]  += beta * (grad_detached - mean_grads[i])           # mean_g
         mean[i]        += (beta - 1) * mean[i] + 1                 # s counter
 
-        d_params_params[i] += beta * ((param - mean_params[i]) ** 2 - d_params_params[i])  # d_theta_theta
-        d_grads_params[i]  += beta * ((grad - mean_grads[i]) * (param - mean_params[i]) - d_grads_params[i])  # d_g_theta
+        d_params_params[i] += beta * ((param_detached - mean_params[i]) ** 2 - d_params_params[i])  # d_theta_theta
+        d_grads_params[i]  += beta * ((grad_detached - mean_grads[i]) * (param_detached - mean_params[i]) - d_grads_params[i])  # d_g_theta
 
         # Diagonal Hessian proxy
         H_sign = torch.sign(d_grads_params[i])
