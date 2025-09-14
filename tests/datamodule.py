@@ -16,7 +16,7 @@ class ZeroTargetDataset(Dataset):
 
     def __getitem__(self, idx):
         x, y = self.dataset[idx]
-        return x, y%2 
+        return x, y%2
 
 class MNISTDataModule(pl.LightningDataModule):
     def __init__(self, batch_size, data_dir: str = PATH_DATASETS):

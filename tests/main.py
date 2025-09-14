@@ -10,13 +10,15 @@ from pathlib import Path
 
 from src.optim.dOGR import dOGR
 from src.optim.OGR import OGR
+from src.optim.BFGS import BFGS
 
 LOGGING_DIR = Path(__file__).parent.parent / "logs"
 
 
 def run(
     net,
-    optimizer,
+    optimizer_cls,
+    optimizer_kwargs,
     name,
     datamodule,
     version,
@@ -25,7 +27,8 @@ def run(
 ):
     module = TestLightningModule(
         net,
-        optimizer,
+        optimizer_cls=optimizer_cls,
+        optimizer_kwargs=optimizer_kwargs,
     )
 
 
@@ -37,6 +40,8 @@ def run(
 
     trainer = L.Trainer(
         max_epochs=max_epochs,
+        accelerator="cuda",
+        devices="auto",
         logger=logger,
         log_every_n_steps=25,
         gradient_clip_val=1.0
@@ -60,6 +65,10 @@ optimizer_dict = {
     },
     "OGR": {
         "opt": OGR,
+        "args": {},
+    },
+    "BFGS": {
+        "opt": BFGS,
         "args": {},
     },
 }
@@ -92,9 +101,8 @@ def main():
     args = parser.parse_args()
 
     net = net_dict[args.net]()
-    optimizer = optimizer_dict[args.optimizer]["opt"](
-        net.parameters(), **(optimizer_dict[args.optimizer]["args"])
-    )
+    optimizer_cls = optimizer_dict[args.optimizer]["opt"]
+    optimizer_kwargs = optimizer_dict[args.optimizer]["args"]
     
     datamodule = None
     if args.data == "MNIST": 
@@ -106,7 +114,8 @@ def main():
     
     run(
         net,
-        optimizer,
+        optimizer_cls=optimizer_cls,
+        optimizer_kwargs=optimizer_kwargs,
         datamodule=datamodule,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,

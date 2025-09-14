@@ -11,18 +11,8 @@ from torch.optim import Optimizer
 from torch.optim.optimizer import ParamsT, _use_grad_for_differentiable
 from torch import Tensor
 
-def flat_params(params: list[Tensor]):
-    return torch.cat([
-        param.flatten() for param in params
-    ]) 
+from .utils import restore_tensor_list, flat_tensor_list
 
-def param_restore_size(flat_params, params_sizes, params_shapes):
-    # # print(flat_params.shape)
-    # # print(params_shapes)
-    # # print(params_sizes)
-    splited = torch.split(flat_params, params_sizes)
-    # # print(splited[0].shape)
-    return [s.view(shape) for s, shape in zip(splited, params_shapes)]
 
 class OGR(Optimizer):
     def __init__(
@@ -53,7 +43,6 @@ class OGR(Optimizer):
 
         super().__init__(params, defaults)
 
-
     def _init_group(
         self,
         group,
@@ -71,32 +60,75 @@ class OGR(Optimizer):
             if p.grad.is_sparse:
                 has_sparse_grad = True
 
-        params_flat = flat_params(params)
-        grads_flat = flat_params(grads)
+        params_flat = flat_tensor_list(params)
+        grads_flat = flat_tensor_list(grads)
         # print("__init_group: ", torch.isnan(grads_flat).any())
         size = params_flat.shape[0]
 
-        if "first_time" not in group: 
-            group["first_time"] = True 
-        
+        self.device = params_flat.device
+
+        if "first_time" not in group:
+            group["first_time"] = True
+
             group["params_size"] = [param.numel() for param in params]
             group["params_shape"] = [param.shape for param in params]
-        
-            group["mean_params"] = torch.zeros_like(params_flat)
-            group["mean_grads"] = torch.zeros_like(params_flat)
-            group["mean"] = 0
-            group["d_params_params"] = torch.zeros((size, size))
-            group["d_grads_params"] = torch.zeros((size, size))
 
-        elif group["first_time"]: 
+            group["mean_params"] = torch.zeros_like(params_flat, device=self.device)
+            group["mean_grads"] = torch.zeros_like(params_flat, device=self.device)
+            group["mean"] = 0
+            group["d_params_params"] = torch.zeros((size, size), device=self.device)
+            group["d_grads_params"] = torch.zeros((size, size), device=self.device)
+
+        elif group["first_time"]:
             group["first_time"] = False
 
-        return has_sparse_grad, params_flat, grads_flat, group["mean_params"], group["mean_grads"], group["mean"], group["d_params_params"], group["d_grads_params"], group["first_time"]
+        return (
+            has_sparse_grad,
+            params_flat,
+            grads_flat,
+            group["mean_params"],
+            group["mean_grads"],
+            group["mean"],
+            group["d_params_params"],
+            group["d_grads_params"],
+            group["first_time"],
+        )
 
     def _save_to_group(self, group, **kwargs):
         for key, value in kwargs.items():
             group[key] = value
         return group
+
+    def get_H(self):
+        group = self.param_groups[0]
+
+        if "first_time" not in group:
+            cnt = 0
+            for p in group["params"]:
+                if p.grad is not None:
+                    cnt += p.numel()
+            print(cnt)
+            print(torch.eye(cnt))
+            return torch.eye(cnt)
+
+        H = _get_hessian(
+            group["mean_params"],
+            group["mean_grads"],
+            group["mean"],
+            group["d_params_params"],
+            group["d_grads_params"],
+            group["eps"],
+        )
+
+        return H
+
+    def get_H_inv(self):
+        H = self.get_H()
+
+        L, Q = torch.linalg.eigh(H)
+
+        # TODO check
+        return Q @ torch.diag(torch.where(L == 0, 1e9 * torch.sign(L), 1 / L)) @ Q.T
 
     @_use_grad_for_differentiable
     def step(self, closure=None) -> Union[None, float]:
@@ -105,27 +137,32 @@ class OGR(Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        if len(self.param_groups) > 1: 
+        if len(self.param_groups) > 1:
             raise ValueError("Only one parameter group is supported")
 
         for group in self.param_groups:
-            _, params, \
-            grads, \
-            mean_params, \
-            mean_grads, \
-            means, \
-            d_params_params, \
-            d_grads_params, \
-            first_time = self._init_group(
-                group=group
-            )
+            (
+                _,
+                params,
+                grads,
+                mean_params,
+                mean_grads,
+                means,
+                d_params_params,
+                d_grads_params,
+                first_time,
+            ) = self._init_group(group=group)
 
             # # print(params.shape)
 
-            update_values, mean_params, \
-            mean_grads, d_params_params, \
-            d_grads_params, means \
-            = ogr(
+            (
+                update_values,
+                mean_params,
+                mean_grads,
+                d_params_params,
+                d_grads_params,
+                means,
+            ) = ogr(
                 params,
                 grads,
                 first_time=first_time,
@@ -136,13 +173,15 @@ class OGR(Optimizer):
                 mean_grads=mean_grads,
                 d_params_params=d_params_params,
                 d_grads_params=d_grads_params,
-                means=means, 
+                means=means,
                 maximize=group["maximize"],
                 hybrid_clipping=group["hybrid_clipping"],
                 neg_clip_val=group["neg_clip_val"],
             )
 
-            update_values = param_restore_size(update_values, group["params_size"], group["params_shape"])
+            update_values = restore_tensor_list(
+                update_values, group["params_size"], group["params_shape"]
+            )
 
             self._save_to_group(
                 group,
@@ -169,7 +208,7 @@ def _get_new_moving_average(
     d_grads_param: Tensor,
     mean: float,
 ):
-    if first_time: 
+    if first_time:
         beta = 1
 
     # Calculate means
@@ -178,20 +217,21 @@ def _get_new_moving_average(
 
     # mean_theta = beta * theta + (1 - beta) mean_theta
     # print("in new arerage params", mean_param,
-          # torch.isnan(mean_param).any(), param, torch.isnan(param).any())
+    # torch.isnan(mean_param).any(), param, torch.isnan(param).any())
 
     local_mean_params = mean_param + beta * (param - mean_param)
 
     # mean_g = beta * g + (1 - beta) * g
     # print("in new average", mean_grad,
-          # torch.isnan(mean_grad).any(), grad, torch.isnan(grad).any())
+    # torch.isnan(mean_grad).any(), grad, torch.isnan(grad).any())
     local_mean_grads = mean_grad + beta * (grad - mean_grad)
 
     local_mean = mean * beta + 1
 
     # d_theta_theta = (1 - beta) * theta_hat_mean**2 + beta * theta_hat**2
     local_d_params_params = d_params_param + beta * (
-        torch.outer(param - local_mean_params, param - local_mean_params) - d_params_param
+        torch.outer(param - local_mean_params, param - local_mean_params)
+        - d_params_param
     )
 
     # d_g_theta = (1 - beta) * d_g_theta + beta * g_hat_theta_hat
@@ -209,7 +249,7 @@ def _get_new_moving_average(
 
 
 def _get_hessian(
-    mean_params: Tensor, 
+    mean_params: Tensor,
     mean_grads: Tensor,
     mean: float,
     d_params_param: Tensor,
@@ -220,25 +260,20 @@ def _get_hessian(
     size = mean_params.shape[0]
 
     # print("mean_grads, mean_params", mean_grads, mean_params)
-    A = d_params_param - mean_params.unsqueeze(1) @ mean_params.unsqueeze(0)
-    B = d_grads_param + d_grads_param.T 
+    print("d_params_params", d_params_param)
+    A = d_params_param 
+    B = d_grads_param + d_grads_param.T
     # print("A in fu", A)
     A = A + A.T
 
     L, O = torch.linalg.eigh(A)
 
-    # print("L in fu", L, torch.min(L))
+    print("L in fu", L, torch.min(L))
 
-    H = O @ (O.T @ B @ O) / \
-        (   
-            L.unsqueeze(0).expand(size,size) + 
-            L.unsqueeze(1).expand(size,size) 
-            # torch.maximum(
-            #     L.unsqueeze(0).expand(size,size) + 
-            #     L.unsqueeze(1).expand(size,size), 
-            #     torch.ones((size,size)) * eps
-            # )
-        ) @ O.T
+    TT = L.unsqueeze(0).expand(size, size) + L.unsqueeze(1).expand(size, size) + 1e-14
+    H = (
+        O @ (O.T @ B @ O) * (1 / TT) @ O.T
+    )
 
     return H
 
@@ -287,7 +322,7 @@ def ogr(
 
     H = _get_hessian(
         mean_params,
-        mean_grads, 
+        mean_grads,
         means,
         d_params_param=d_params_params,
         d_grads_param=d_grads_params,
@@ -302,12 +337,14 @@ def ogr(
     #
     # print("max grad", torch.max(torch.abs(mean_grads)))
     # print("max Q", torch.max(torch.abs(Q)))
-    update_values = - (1 / 1.5) * Q @ (
-            torch.diag(
-                1 / torch.maximum(torch.ones_like(L) * 20, torch.abs(L))
-            )
-        ) @ Q.T @ mean_grads 
-   
+    update_values = (
+        -(1 / 1.5)
+        * Q
+        @ (torch.diag(1 / torch.maximum(torch.ones_like(L) * 20, torch.abs(L))))
+        @ Q.T
+        @ mean_grads
+    )
+
     # print(
     #     "L", L,
     #     torch.maximum(torch.ones_like(L) * 10, torch.abs(L))
@@ -315,9 +352,9 @@ def ogr(
     # print(
     # )
     # print("max update values", torch.max(torch.abs(update_values)))
-    
+
     # update_values = torch.clip(
-    #     update_values, 
+    #     update_values,
     #     min = -2,
     #     max = 2,
     # )
@@ -330,7 +367,11 @@ def ogr(
             "Wykryto wartość NaN w parametrach - trening jest niestabilny."
         )
 
-    return update_values, mean_params, \
-            mean_grads, d_params_params, \
-            d_grads_params, means
-   
+    return (
+        update_values,
+        mean_params,
+        mean_grads,
+        d_params_params,
+        d_grads_params,
+        means,
+    )
