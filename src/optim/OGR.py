@@ -18,8 +18,8 @@ class OGR(Optimizer):
     def __init__(
         self,
         params: ParamsT,
-        lr: Union[float, Tensor] = 1e-3,
-        beta: float = 0.50,
+        lr: Union[float, Tensor] = (1 / 1.5),
+        beta: float = 0.30,
         eps: float = 1e-12,
         maximize: bool = False,
         differentiable: bool = False,
@@ -62,10 +62,8 @@ class OGR(Optimizer):
 
         params_flat = flat_tensor_list(params)
         grads_flat = flat_tensor_list(grads)
-        # print("__init_group: ", torch.isnan(grads_flat).any())
-        size = params_flat.shape[0]
 
-        self.device = params_flat.device
+        size = params_flat.shape[0]
 
         if "first_time" not in group:
             group["first_time"] = True
@@ -73,11 +71,13 @@ class OGR(Optimizer):
             group["params_size"] = [param.numel() for param in params]
             group["params_shape"] = [param.shape for param in params]
 
-            group["mean_params"] = torch.zeros_like(params_flat, device=self.device)
-            group["mean_grads"] = torch.zeros_like(params_flat, device=self.device)
+            group["mean_params"] = torch.zeros_like(params_flat)
+            group["mean_grads"] = torch.zeros_like(params_flat)
             group["mean"] = 0
-            group["d_params_params"] = torch.zeros((size, size), device=self.device)
-            group["d_grads_params"] = torch.zeros((size, size), device=self.device)
+            # group["d_params_params"] = torch.zeros((size, size))
+            # group["d_grads_params"] = torch.zeros((size, size))
+            group["d_params_params"] = torch.eye(size)
+            group["d_grads_params"] = torch.eye(size)
 
         elif group["first_time"]:
             group["first_time"] = False
@@ -102,15 +102,6 @@ class OGR(Optimizer):
     def get_H(self):
         group = self.param_groups[0]
 
-        if "first_time" not in group:
-            cnt = 0
-            for p in group["params"]:
-                if p.grad is not None:
-                    cnt += p.numel()
-            print(cnt)
-            print(torch.eye(cnt))
-            return torch.eye(cnt)
-
         H = _get_hessian(
             group["mean_params"],
             group["mean_grads"],
@@ -127,8 +118,11 @@ class OGR(Optimizer):
 
         L, Q = torch.linalg.eigh(H)
 
-        # TODO check
-        return Q @ torch.diag(torch.where(L == 0, 1e9 * torch.sign(L), 1 / L)) @ Q.T
+        return (
+            Q
+            @ (torch.diag(1 / torch.maximum(torch.ones_like(L) * 20, torch.abs(L))))
+            @ Q.T
+        )
 
     @_use_grad_for_differentiable
     def step(self, closure=None) -> Union[None, float]:
@@ -208,17 +202,14 @@ def _get_new_moving_average(
     d_grads_param: Tensor,
     mean: float,
 ):
-    if first_time:
-        beta = 1
+    # if first_time:
+    #     beta = 1
 
     # Calculate means
     # In comments we include the formulas with symbols coresponing
     # to ones used in the paper https://arxiv.org/pdf/1901.11457
 
     # mean_theta = beta * theta + (1 - beta) mean_theta
-    # print("in new arerage params", mean_param,
-    # torch.isnan(mean_param).any(), param, torch.isnan(param).any())
-
     local_mean_params = mean_param + beta * (param - mean_param)
 
     # mean_g = beta * g + (1 - beta) * g
@@ -259,20 +250,21 @@ def _get_hessian(
 
     size = mean_params.shape[0]
 
-    # print("mean_grads, mean_params", mean_grads, mean_params)
-    print("d_params_params", d_params_param)
-    A = d_params_param 
+    A = d_params_param
     B = d_grads_param + d_grads_param.T
     # print("A in fu", A)
-    A = A + A.T
 
     L, O = torch.linalg.eigh(A)
 
-    print("L in fu", L, torch.min(L))
+    if (L == 0).any():
+        return torch.eye(L.shape[0])
+    # print("L in fu", L, torch.min(L))
 
-    TT = L.unsqueeze(0).expand(size, size) + L.unsqueeze(1).expand(size, size) + 1e-14
     H = (
-        O @ (O.T @ B @ O) * (1 / TT) @ O.T
+        O
+        @ (O.T @ B @ O)
+        / (L.unsqueeze(0).expand(size, size) + L.unsqueeze(1).expand(size, size))
+        @ O.T
     )
 
     return H
@@ -329,37 +321,15 @@ def ogr(
         eps=eps,
     )
 
-    # print("H", H)
-
     L, Q = torch.linalg.eigh(H)
 
-    # print("L, Q", L, Q)
-    #
-    # print("max grad", torch.max(torch.abs(mean_grads)))
-    # print("max Q", torch.max(torch.abs(Q)))
     update_values = (
-        -(1 / 1.5)
+        - lr
         * Q
         @ (torch.diag(1 / torch.maximum(torch.ones_like(L) * 20, torch.abs(L))))
         @ Q.T
-        @ mean_grads
+        @ grads_flat
     )
-
-    # print(
-    #     "L", L,
-    #     torch.maximum(torch.ones_like(L) * 10, torch.abs(L))
-    # )
-    # print(
-    # )
-    # print("max update values", torch.max(torch.abs(update_values)))
-
-    # update_values = torch.clip(
-    #     update_values,
-    #     min = -2,
-    #     max = 2,
-    # )
-
-    # print("update_values", update_values)
 
     # for debug
     if torch.isnan(params_flat).any():
