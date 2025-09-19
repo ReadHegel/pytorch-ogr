@@ -1,52 +1,63 @@
-import re
 import torch
 from torch.optim.optimizer import Optimizer
-from torch.optim.optimizer import ParamsT, _use_grad_for_differentiable
 
-from .utils import restore_tensor_list, flat_tensor_list
+try:
+    from .utils import restore_tensor_list, flat_tensor_list  # package-style
+except Exception:
+    from utils import restore_tensor_list, flat_tensor_list   # local fallback
 
 
 class BFGS(Optimizer):
-    def __init__(self, params, lr=1.0):
+    def __init__(self, params, lr: float = 1.0):
         if not 0.0 <= lr:
             raise ValueError(f"Wrong learning rate: {lr}")
 
         defaults = dict(lr=lr)
-        super(BFGS, self).__init__(params, defaults)
+        super().__init__(params, defaults)
 
         if len(self.param_groups) > 1:
-            raise ValueError("BFSG dosnt support more then one group")
+            raise ValueError("BFGS doesn't support more than one parameter group")
 
         self.count_params = 0
         self.parameter_device = None
+        self.parameter_dtype = None
         self.param_sizes = []
         self.param_shapes = []
 
         for group in self.param_groups:
             for p in group["params"]:
                 if p.requires_grad:
+                    if self.parameter_device is None:
+                        self.parameter_device = p.device
+                    if self.parameter_dtype is None:
+                        self.parameter_dtype = p.data.dtype
+
+                    if p.device != self.parameter_device:
+                        raise RuntimeError("All params must be on the same device")
+                    if p.data.dtype != self.parameter_dtype:
+                        raise RuntimeError("All params must share the same dtype")
+
                     self.count_params += p.data.numel()
                     self.param_sizes.append(p.data.numel())
                     self.param_shapes.append(p.data.shape)
-                    self.parameter_device = p.device
 
             group["step"] = 0
-            group["H_inv"] = torch.eye(self.count_params, device=self.parameter_device)
+            group["H_inv"] = torch.eye(
+                self.count_params, device=self.parameter_device, dtype=self.parameter_dtype
+            )
             group["prev_flat_grad"] = torch.zeros(
-                self.count_params, device=self.parameter_device
+                self.count_params, device=self.parameter_device, dtype=self.parameter_dtype
             )
             group["prev_p_flat"] = torch.zeros(
-                self.count_params, device=self.parameter_device
+                self.count_params, device=self.parameter_device, dtype=self.parameter_dtype
             )
 
     def get_H_inv(self):
-        group = self.param_groups[0]
-        return group["H_inv"]
+        return self.param_groups[0]["H_inv"]
 
-    def get_H(self): 
+    def get_H(self):
         return torch.inverse(self.get_H_inv())
 
-    # @_use_grad_for_differentiable
     def step(self, closure=None):
         loss = None
         if closure is not None:
@@ -61,47 +72,49 @@ class BFGS(Optimizer):
 
             for p in group["params"]:
                 if p.grad is not None:
+                    if p.grad.data.is_sparse:
+                        raise RuntimeError("BFGS doesn't support sparse gradients.")
                     param_list.append(p)
                     grad_list.append(p.grad.data)
 
-                    if p.grad.data.is_sparse:
-                        raise RuntimeError("BFGS dosnt support sparse gradients.")
-
-            p_flat = flat_tensor_list(param_list).to(device=self.parameter_device)
-            flat_grad = flat_tensor_list(grad_list).to(device=self.parameter_device)
+            if not param_list:
+                continue
+            p_flat = flat_tensor_list(param_list).to(
+                device=self.parameter_device, dtype=self.parameter_dtype
+            )
+            flat_grad = flat_tensor_list(grad_list).to(
+                device=self.parameter_device, dtype=self.parameter_dtype
+            )
 
             group["step"] += 1
 
             if group["step"] > 1:
-                y = flat_grad - group["prev_flat_grad"]
-                s = p_flat - group["prev_p_flat"]
-
+                y = flat_grad - group["prev_flat_grad"]  # Δg
+                s = p_flat   - group["prev_p_flat"]      # Δx
                 sy = torch.dot(s, y)
 
-                if sy > 1e-10:
+                eps = torch.finfo(self.parameter_dtype).eps
+                if sy > eps:
                     H_inv = group["H_inv"]
                     rho = 1.0 / sy
 
-                    I = torch.eye(self.count_params, device=self.parameter_device)
+                    I = torch.eye(
+                        self.count_params, device=self.parameter_device, dtype=self.parameter_dtype
+                    )
 
                     term1 = I - rho * torch.outer(s, y)
                     term2 = I - rho * torch.outer(y, s)
-
-                    H_inv = torch.matmul(
-                        torch.matmul(term1, H_inv), term2
-                    ) + rho * torch.outer(s, s)
-                    group["H_inv"] = H_inv
+                    H_inv = term1 @ H_inv @ term2 + rho * torch.outer(s, s)
+                    group["H_inv"] = 0.5 * (H_inv + H_inv.T)
 
             group["prev_flat_grad"] = flat_grad.clone()
             group["prev_p_flat"] = p_flat.clone()
 
-            direction = -torch.matmul(group["H_inv"], flat_grad)
+            direction = -(group["H_inv"] @ flat_grad)
 
             updates_list = [
-                t.to(device=self.parameter_device)
-                for t in restore_tensor_list(
-                    direction, self.param_sizes, self.param_shapes
-                )
+                t.to(device=self.parameter_device, dtype=self.parameter_dtype)
+                for t in restore_tensor_list(direction, self.param_sizes, self.param_shapes)
             ]
 
             i = 0
@@ -109,7 +122,8 @@ class BFGS(Optimizer):
                 if p.grad is not None:
                     update = updates_list[i]
                     i += 1
-
+                    if update.dtype != p.data.dtype:
+                        update = update.to(dtype=p.data.dtype)
                     p.data.add_(update, alpha=lr)
 
         return loss
