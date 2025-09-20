@@ -39,11 +39,11 @@ def make_loaders(datadir="DATA", batch_size=64):
     # WINDOWS: trzymaj num_workers = 0 i persistent_workers = False
     train_loader = DataLoader(
         train, batch_size=batch_size, shuffle=True,
-        num_workers=0, persistent_workers=False
+        num_workers=4, persistent_workers=False
     )
     val_loader = DataLoader(
         val, batch_size=batch_size, shuffle=False,
-        num_workers=0, persistent_workers=False
+        num_workers=4, persistent_workers=False
     )
     return train_loader, val_loader
 
@@ -53,6 +53,7 @@ def parse_args():
     p.add_argument("--init_as_zeros", type=int, default=0, help="0/1: inicjalizacja zerowa polityki")
     p.add_argument("--max_steps", type=int, default=0, help="maks. liczba kroków treningu (0 = domyślnie PL)")
     p.add_argument("--logger_name", type=str, default="mnist_run", help="nazwa eksperymentu (katalog w lightning_logs)")
+    p.add_argument("--max_epochs", type=int, default=10, help="maks. liczba epok treningu")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--data_dir", type=str, default="DATA")
     return p.parse_args()
@@ -100,6 +101,7 @@ if __name__ == "__main__":
         log_every_n_steps=1,
         num_sanity_val_steps=0,
         enable_checkpointing=False,
+        max_epochs=args.max_epochs,
     )
     if args.max_steps and args.max_steps > 0:
         trainer_kwargs["max_steps"] = args.max_steps

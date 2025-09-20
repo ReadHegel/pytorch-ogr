@@ -81,6 +81,8 @@ class TestLightningModule(L.LightningModule):
             else:
                 actions, log_prob, entropy = out
 
+            log_prob = torch.clamp(log_prob, -10, 10)
+
             # Loss PO kroku
             with torch.no_grad():
                 loss_after = F.cross_entropy(self.net(x), target)
@@ -98,7 +100,7 @@ class TestLightningModule(L.LightningModule):
             # log_prob to skalar
             policy_loss = -(log_prob * advantage)
             if entropy is not None:
-                policy_loss = policy_loss - 1e-3 * entropy
+                policy_loss = policy_loss - 1e-2 * entropy
 
             # Update polityki
             policy_optimizer.zero_grad()
