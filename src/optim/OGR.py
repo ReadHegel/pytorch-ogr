@@ -4,15 +4,17 @@ Paper: https://arxiv.org/pdf/1901.11457
 """
 from typing import Union, Optional, List, Tuple
 
+from sympy import group
 import torch
 from torch import Tensor
 from torch.optim import Optimizer
 from torch.optim.optimizer import ParamsT, _use_grad_for_differentiable
+from scipy.optimize import line_search
 
 try:
-    from .utils import restore_tensor_list, flat_tensor_list  # package-style
+    from .utils import restore_tensor_list, flat_tensor_list 
 except Exception:
-    from utils import restore_tensor_list, flat_tensor_list   # local fallback
+    from utils import restore_tensor_list, flat_tensor_list  
 
 
 def _safe_eigh(H: Tensor, jitter: float = 1e-8, max_tries: int = 6) -> Tuple[Tensor, Tensor]:
@@ -153,7 +155,7 @@ class OGR(Optimizer):
         return _get_H_inv_from_H(H)
 
     @_use_grad_for_differentiable
-    def step(self, closure=None) -> Union[None, float]:
+    def step(self, closure=None, use_line_search=False) -> Union[None, float]:
         loss: Union[None, float] = None
         if closure is not None:
             with torch.enable_grad():
@@ -163,6 +165,17 @@ class OGR(Optimizer):
             raise ValueError("Only one parameter group is supported")
 
         for group in self.param_groups:
+            if loss is not None:
+                params_for_grad = [p for p in group["params"]]
+                # compute_graph required if we want differentiable behavior elsewhere
+                create_graph = group.get("differentiable", False)
+                grads = torch.autograd.grad(loss, params_for_grad, create_graph=create_graph, allow_unused=True)
+                # Attach grads to parameters (replace None with zeros)
+                for p, g in zip(params_for_grad, grads):
+                    if g is None:
+                        p.grad = torch.zeros_like(p)
+                    else:
+                        p.grad = g
             (
                 _,
                 params,
@@ -198,6 +211,11 @@ class OGR(Optimizer):
                 hybrid_clipping=group["hybrid_clipping"],
                 neg_clip_val=group["neg_clip_val"],
                 max_step_norm=group["max_step_norm"],
+                use_line_search=use_line_search,
+                closure=closure,
+                param_list=group["params"],
+                param_sizes=group["params_size"],
+                param_shapes=group["params_shape"],
             )
 
             update_values = restore_tensor_list(
@@ -216,7 +234,8 @@ class OGR(Optimizer):
             for p, update_value in zip(group["params"], update_values):
                 p.data.add_(update_value)
 
-        return loss
+        final_loss = closure()
+        return final_loss
 
 
 def _get_new_moving_average(
@@ -267,6 +286,12 @@ def ogr(
     hybrid_clipping: bool,
     neg_clip_val: Optional[float],
     max_step_norm: Optional[float],
+    closure,
+    param_list,
+    param_sizes,
+    param_shapes,
+    use_line_search: bool = False,
+
 ):
     grads_flat = grads_flat if not maximize else -grads_flat
 
@@ -304,18 +329,71 @@ def ogr(
     )
 
     H_inv = _get_H_inv_from_H(H)
-    update_values = - lr * (H_inv @ grads_flat)
+    direction = - (H_inv @ grads_flat)
 
     if max_step_norm is not None:
-        step_norm = update_values.norm()
+        step_norm = direction.norm()
         if step_norm > max_step_norm:
-            update_values = update_values * (max_step_norm / (step_norm + 1e-12))
+            direction = direction * (max_step_norm / (step_norm + 1e-12))
+
+    alpha = lr
+    final_updates = alpha * direction
+
+    if use_line_search:
+        current_params_np = params_flat.detach().cpu().numpy()
+        grad_np = grads_flat.detach().cpu().numpy()
+        direction_np = direction.detach().cpu().numpy()
+
+        def _get_loss_and_grad(params_np):
+            temp_params_tensor_list = restore_tensor_list(
+                torch.from_numpy(params_np).to(param_list[0].device, dtype=param_list[0].dtype),
+                param_sizes,
+                param_shapes,
+            )
+
+            original_params_data = [p.data.clone() for p in param_list]
+
+            with torch.no_grad():
+                for p, t in zip(param_list, temp_params_tensor_list):
+                    p.data.copy_(t)
+
+            with torch.enable_grad():
+
+                new_loss = closure()
+
+
+                new_grads = torch.autograd.grad(new_loss, param_list, create_graph=True, allow_unused=True)
+
+            new_grads = [g if g is not None else torch.zeros_like(p) for g, p in zip(new_grads, param_list)]
+
+            new_grad = flat_tensor_list([g.detach() for g in new_grads]).cpu().numpy()
+
+            with torch.no_grad():
+                for p, orig in zip(param_list, original_params_data):
+                    p.data.copy_(orig)
+
+            return new_loss.item(), new_grad
+
+
+
+        alpha, _, _, _, _, new_grad = line_search(
+            f=lambda x: _get_loss_and_grad(x)[0],
+            myfprime=lambda x: _get_loss_and_grad(x)[1],
+            xk=current_params_np,
+            pk=direction_np,
+            gfk=grad_np
+        )
+        
+        if alpha is None:
+            alpha = 1.0
+        
+        final_updates = alpha * direction
 
     if torch.isnan(params_flat).any():
         raise RuntimeError("Wykryto wartość NaN w parametrach - trening jest niestabilny.")
 
     return (
-        update_values,
+        final_updates,
         mean_params,
         mean_grads,
         d_params_params,

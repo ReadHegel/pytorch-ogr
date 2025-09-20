@@ -127,7 +127,6 @@ class TestLightningModule(L.LightningModule):
         return loss
 
     def on_train_epoch_start(self):
-    def on_train_epoch_start(self):
         self.epoch_start_time = time.time()
 
     def on_train_epoch_end(self):

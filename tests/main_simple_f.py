@@ -17,21 +17,19 @@ class Quadratic(nn.Module):
 def use_OGR():
     model = Quadratic()
     optimizer = OGR(model.parameters())
+    def closure():
+        optimizer.zero_grad()
+        loss = model()
+        return loss
+
+
 
     for step in range(20):
-        optimizer.zero_grad()
-        loss = model()  # f(x,y)
-        # loss.backward(create_graph=True)
-        grads = torch.autograd.grad(
-            loss, model.parameters(), create_graph=True
-        )
-        for p, g in zip(model.parameters(), grads): 
-            p.grad = g
-
-        optimizer.step()
+        loss = optimizer.step(closure=closure, use_line_search=False)
+        real_loss = model()
 
         print("H estimated with OGR", optimizer.get_H())
-        print("H real", get_bp_hessian_from_loss(loss, list(model.parameters())))
+        print("H real", get_bp_hessian_from_loss(real_loss, list(model.parameters())))
 
         print(
             f"Step {step:02d} | loss = {loss.item():.6f} | x = {model.x.item():.4f}, y = {model.y.item():.4f}"

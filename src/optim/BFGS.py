@@ -1,5 +1,6 @@
 import torch
 from torch.optim.optimizer import Optimizer
+from scipy.optimize import line_search
 
 try:
     from .utils import restore_tensor_list, flat_tensor_list  # package-style
@@ -51,6 +52,7 @@ class BFGS(Optimizer):
             group["prev_p_flat"] = torch.zeros(
                 self.count_params, device=self.parameter_device, dtype=self.parameter_dtype
             )
+            group["prev_loss"] = float('inf')
 
     def get_H_inv(self):
         return self.param_groups[0]["H_inv"]
@@ -58,11 +60,11 @@ class BFGS(Optimizer):
     def get_H(self):
         return torch.inverse(self.get_H_inv())
 
-    def step(self, closure=None):
-        loss = None
+    def step(self, closure=None, use_line_search=False):
+        initial_loss = None
         if closure is not None:
             with torch.enable_grad():
-                loss = closure()
+                initial_loss = closure()
 
         for group in self.param_groups:
             lr = group["lr"]
@@ -89,8 +91,8 @@ class BFGS(Optimizer):
             group["step"] += 1
 
             if group["step"] > 1:
-                y = flat_grad - group["prev_flat_grad"]  # Δg
-                s = p_flat   - group["prev_p_flat"]      # Δx
+                y = flat_grad - group["prev_flat_grad"]  
+                s = p_flat   - group["prev_p_flat"]      
                 sy = torch.dot(s, y)
 
                 eps = torch.finfo(self.parameter_dtype).eps
@@ -107,14 +109,79 @@ class BFGS(Optimizer):
                     H_inv = term1 @ H_inv @ term2 + rho * torch.outer(s, s)
                     group["H_inv"] = 0.5 * (H_inv + H_inv.T)
 
-            group["prev_flat_grad"] = flat_grad.clone()
-            group["prev_p_flat"] = p_flat.clone()
-
             direction = -(group["H_inv"] @ flat_grad)
+
+            alpha = group['lr']
+            new_loss = initial_loss
+
+            if use_line_search:
+                current_params_np = p_flat.detach().cpu().numpy()
+                grad_np = flat_grad.detach().cpu().numpy()
+                direction_np = direction.detach().cpu().numpy()
+
+                def get_loss_and_grad(params_np):
+                    updates_list = [
+                        t.to(device=self.parameter_device, dtype=self.parameter_dtype)
+                        for t in restore_tensor_list(torch.from_numpy(params_np), self.param_sizes, self.param_shapes)
+                    ]
+
+                    original_data = [p.data.clone() for p in param_list]
+                    original_grads = [None if p.grad is None else p.grad.clone() for p in param_list]
+                    with torch.no_grad():
+                        for p, new_val in zip(param_list, updates_list):
+                            p.data.copy_(new_val)
+
+
+                    for p in param_list:
+                        p.grad = None
+
+
+                    new_loss = closure() 
+
+                    new_grads = []
+                    for p in param_list:
+                        g = p.grad
+                        if g is None:
+                            new_grads.append(torch.zeros_like(p))
+                        else:
+                            new_grads.append(g.detach().clone())
+
+
+                    new_grad_flat = flat_tensor_list(new_grads).cpu().numpy()
+
+
+                    with torch.no_grad():
+                        for p, orig in zip(param_list, original_data):
+                            p.data.copy_(orig)
+
+
+                    for p, og in zip(param_list, original_grads):
+                        if og is None:
+                            p.grad = None
+                        else:
+                            p.grad = og.clone()
+
+                    return float(new_loss), new_grad_flat
+
+
+                alpha, _, _, _, _, new_grad = line_search(
+                    f=lambda x: get_loss_and_grad(x)[0],
+                    myfprime=lambda x: get_loss_and_grad(x)[1],
+                    xk=current_params_np,
+                    pk=direction_np,
+                    gfk=grad_np,
+                )
+
+                if alpha is None:
+                    alpha = 1.0
+            
+            final_updates = alpha * direction
+
+
 
             updates_list = [
                 t.to(device=self.parameter_device, dtype=self.parameter_dtype)
-                for t in restore_tensor_list(direction, self.param_sizes, self.param_shapes)
+                for t in restore_tensor_list(final_updates, self.param_sizes, self.param_shapes)
             ]
 
             i = 0
@@ -124,6 +191,10 @@ class BFGS(Optimizer):
                     i += 1
                     if update.dtype != p.data.dtype:
                         update = update.to(dtype=p.data.dtype)
-                    p.data.add_(update, alpha=lr)
+                    p.data.add_(update)
 
-        return loss
+            group["prev_flat_grad"] = flat_grad.clone()
+            group["prev_p_flat"] = p_flat.clone()
+
+        final_loss = closure()
+        return final_loss
