@@ -1,4 +1,4 @@
-import torch 
+import torch
 from torch import nn
 
 def get_FC(): 
