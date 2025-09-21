@@ -7,6 +7,12 @@ from typing import Callable, Dict, Tuple, List, Optional
 import torch
 from torch import Tensor
 
+import itertools
+import os
+import numpy as np
+
+import matplotlib.pyplot as plt
+
 from src.optim.linesearch import Linesearch
 
 
@@ -21,6 +27,7 @@ except Exception:
     from BFGS import BFGS
 
 SEED = 42
+PLOT_PATH = "plots"
 
 
 # ===== Test functions (x: 1-D tensor) =====
@@ -160,14 +167,19 @@ class RunCfg:
         torch.float64
     )  # float64 znacznie stabilniejsze dla (quasi-)Newton
     is_linesearch: bool = False
+    print_trace: bool = False
 
 
 @dataclass
 class Result:
-    best_f: float
-    best_x: Tensor
-    iters: int
-    time_s: float
+    best_f: float = math.inf
+    best_x: Tensor = torch.tensor([])
+    iters: int = -1
+    time_s: float = -1
+    points: List[Tensor] = None
+
+    def __lt__(self, other: "Result") -> bool:
+        return self.best_f < other.best_f
 
 
 def minimize_with_ogr(
@@ -178,62 +190,137 @@ def minimize_with_ogr(
     bounds: Tuple[Tuple[float, float], ...],
     ogr_cfg: Dict[str, float],
 ) -> Result:
-    x = x0.clone().detach().requires_grad_(True)
-    opt = OGR(
-        [x],
-        lr=ogr_cfg.get("lr", 0.5),
-        beta=ogr_cfg.get("beta", 0.2),
-        eps=1e-12,
-        linesearch=ogr_cfg["linesearch"],
-        maximize=False,
-        max_step_norm=ogr_cfg.get("max_step_norm", 1.0),
+    return minimize(
+        fn,
+        x0,
+        steps=steps,
+        tol_grad=tol_grad,
+        bounds=bounds,
+        cfg=ogr_cfg,
+        opt_class=OGR,
     )
-    t0 = time.time()
-    best_f = math.inf
-    best_x = x.detach().clone()
-    for it in range(1, steps + 1):
-        opt.zero_grad(set_to_none=True)
-        f = fn(x)
-        f.backward()
-        opt.step()
-        clamp_inplace(x, bounds)  # BOXING
-        gnorm = x.grad.detach().norm().item() if x.grad is not None else float("inf")
-        if f.item() < best_f:
-            best_f = float(f.item())
-            best_x = x.detach().clone()
-        if gnorm < tol_grad:
-            break
-    return Result(best_f, best_x, it, time.time() - t0)
 
 
 def minimize_with_bfgs(
     fn: Callable[[Tensor], Tensor],
     x0: Tensor,
-    lr: float,
     steps: int,
     tol_grad: float,
     bounds: Tuple[Tuple[float, float], ...],
     bfgs_cfg: Dict = {},
 ) -> Result:
-    x = x0.clone().detach().requires_grad_(True)
-    opt = BFGS([x], lr=lr, linesearch=bfgs_cfg["linesearch"])
+    return minimize(
+        fn,
+        x0,
+        steps=steps,
+        tol_grad=tol_grad,
+        bounds=bounds,
+        cfg=bfgs_cfg,
+        opt_class=BFGS,
+    )
+
+
+def _minimize_with_opt(
+    fn: Callable[[Tensor], Tensor],
+    x: Tensor,
+    opt,
+    steps: int,
+    tol_grad: float,
+    bounds: Tuple[Tuple[float, float], ...],
+):
     t0 = time.time()
     best_f = math.inf
     best_x = x.detach().clone()
     it = 0
+    points = [x.detach().clone()]
+
     for it in range(1, steps + 1):
         opt.zero_grad(set_to_none=True)
+
         f = fn(x)
         f.backward()
         opt.step()
+
         clamp_inplace(x, bounds)  # BOXING
+
+        points.append(x.detach().clone())
+
         gnorm = x.grad.detach().norm().item() if x.grad is not None else float("inf")
         if f.item() < best_f:
             best_f = float(f.item())
             best_x = x.detach().clone()
         if gnorm < tol_grad:
             break
-    return Result(best_f, best_x, it, time.time() - t0)
+
+    return Result(best_f, best_x, it, time.time() - t0, points)
+
+
+def minimize(
+    fn: Callable[[Tensor], Tensor],
+    x0: Tensor,
+    steps: int,
+    tol_grad: float,
+    bounds: Tuple[Tuple[float, float], ...],
+    cfg: Dict,
+    opt_class,
+):
+    x = x0.clone().detach().requires_grad_(True)
+    if opt_class == OGR:
+        opt = OGR(
+            [x],
+            lr=cfg.get("lr", 0.5),
+            beta=cfg.get("beta", 0.2),
+            eps=1e-12,
+            linesearch=cfg["linesearch"],
+            maximize=False,
+            max_step_norm=cfg.get("max_step_norm", 1.0),
+        )
+    else:
+        opt = BFGS([x], lr=cfg["lr"], linesearch=cfg["linesearch"])
+
+    return _minimize_with_opt(
+        fn=fn, x=x, opt=opt, steps=steps, tol_grad=tol_grad, bounds=bounds
+    )
+
+
+TRACES_PATH = os.path.join(PLOT_PATH, "traces")
+
+
+def print_optimization_path(
+    f,
+    points: list[Tensor],
+    bounds: Tuple[Tuple, Tuple],
+    name: str = "Default name",
+) -> None:
+    if len(points) != 0 and points[0].shape != (2,):
+        print(points[0].shape)
+        raise Exception(
+            "Only two dimentional plots are supported by 'print_optimization_path'"
+        )
+
+    x = np.linspace(bounds[0][0], bounds[0][1], 100)
+    y = np.linspace(bounds[1][0], bounds[1][1], 100)
+    X, Y = np.meshgrid(x, y)
+    Z = np.zeros_like(X)
+
+    for i, j in itertools.product(range(X.shape[0]), range(Y.shape[1])):
+        inp = torch.tensor([X[i, j], Y[i, j]], dtype=torch.float32)
+        Z[i, j] = f(inp).item()
+
+    plt.contourf(X, Y, Z, levels=50, cmap="viridis")
+
+    points_np = torch.stack(points).numpy()
+    plt.scatter(
+        points_np[:, 0],
+        points_np[:, 1],
+        s=7,
+        c=np.arange(len(points_np)),
+        cmap="magma",
+    )
+
+    plt.title(name)
+    plt.savefig(os.path.join(TRACES_PATH, name))
+    plt.close()
 
 
 def run_suite(cfg: RunCfg, names: Optional[List[str]] = None) -> None:
@@ -270,49 +357,73 @@ def run_suite(cfg: RunCfg, names: Optional[List[str]] = None) -> None:
 
         ogr_cfg["linesearch"] = linesearch
         bfgs_cfg["linesearch"] = linesearch
+        bfgs_cfg["lr"] = ogr_cfg["lr"]
 
-        best_ogr = math.inf
+        best_ogr_res = Result()
         ogr_err = None
 
         local_restarts = 30 if name == "schwefel" else cfg.restarts
         local_steps = 2000 if name == "schwefel" else cfg.steps
 
+        # OGR optimization
         for i in range(local_restarts):
             x0 = sample_uniform(bounds, device, dtype, seed=SEED + i)
             try:
                 res = minimize_with_ogr(
                     wrap_fn, x0, local_steps, cfg.tol_grad, bounds, ogr_cfg
                 )
-                best_ogr = min(best_ogr, res.best_f)
+                best_ogr_res = min(best_ogr_res, res)
             except Exception as e:
                 ogr_err = str(e)
                 break
         if ogr_err is None:
-            print(f"Best OGR   : {best_ogr:.6e}")
+            print(f"Best OGR   : {best_ogr_res.best_f:.6e}")
         else:
             print(f"Best OGR   : ERROR ({ogr_err})")
 
-        best_bfgs = math.inf
+        if cfg.print_trace:
+            try:
+                print_optimization_path(
+                    f=wrap_fn,
+                    points=best_ogr_res.points,
+                    bounds=bounds,
+                    name=f"OGR {name} opt trace",
+                )
+            except Exception as e:
+                print(f"didnt print trace because {str(e)}")
+
+        # BFGS optmization
+        best_bfgs_res = Result()
 
         for i in range(local_restarts):
             x0 = sample_uniform(bounds, device, dtype, seed=SEED + i)
             res = minimize_with_bfgs(
                 wrap_fn,
                 x0,
-                ogr_cfg["lr"],
                 local_steps,
                 cfg.tol_grad,
                 bounds,
                 bfgs_cfg=bfgs_cfg,
             )
-            best_bfgs = min(best_bfgs, res.best_f)
-        print(f"Best BFGS  : {best_bfgs:.6e}")
+            best_bfgs_res = min(best_bfgs_res, res)
+        print(f"Best BFGS  : {best_bfgs_res.best_f:.6e}")
         print(f"Target f*  : {meta.global_min_f:.6e}\n")
+
+        if cfg.print_trace:
+            try:
+                print_optimization_path(
+                    f=wrap_fn,
+                    points=best_bfgs_res.points,
+                    bounds=bounds,
+                    name=f"BFGS {name} opt trace",
+                )
+            except Exception as e:
+                print(f"didnt print trace because {str(e)}")
 
 
 if __name__ == "__main__":
     CONFIG = RunCfg(
-        dim=10,
+        dim=2,
         restarts=5,
         steps=2000,
         tol_grad=1e-8,
@@ -320,5 +431,6 @@ if __name__ == "__main__":
         device="cpu",
         dtype=torch.float64,
         is_linesearch=True,
+        print_trace=True,
     )
     run_suite(CONFIG)
