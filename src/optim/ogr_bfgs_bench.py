@@ -430,7 +430,7 @@ if __name__ == "__main__":
         seed=42,
         device="cpu",
         dtype=torch.float64,
-        is_linesearch=True,
+        is_linesearch=False,
         print_trace=True,
     )
     run_suite(CONFIG)
