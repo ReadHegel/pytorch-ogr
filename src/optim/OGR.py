@@ -43,7 +43,8 @@ def _get_hessian(
     A = d_params_param
     B = d_grads_param + d_grads_param.T
 
-    L, O = torch.linalg.eigh(A)
+    jitter = torch.eye(A.shape[0], device=A.device, dtype=A.dtype) * eps
+    L, O = torch.linalg.eigh(A + jitter)
 
     Li = L.unsqueeze(0).expand(size, size)
     Lj = L.unsqueeze(1).expand(size, size)
@@ -329,14 +330,14 @@ def ogr(
 
     # perform linesearch
     if linesearch is not None:
-        update_value = linesearch.perform_search(params_flat, update_values)
+        update_values = linesearch.perform_search(params_flat, update_values, grads_flat)
     else: 
         update_values *= lr 
 
-    # if max_step_norm is not None:
-    #     step_norm = update_values.norm()
-    #     if step_norm > max_step_norm:
-    #         update_values = update_values * (max_step_norm / (step_norm + 1e-12))
+    if max_step_norm is not None:
+        step_norm = update_values.norm()
+        if step_norm > max_step_norm:
+            update_values = update_values * (max_step_norm / (step_norm + 1e-12))
 
     if torch.isnan(params_flat).any():
         raise RuntimeError(

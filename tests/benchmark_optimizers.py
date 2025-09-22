@@ -310,4 +310,4 @@ def run_benchmarks(dim=2, steps=2000, tol_grad=1e-8, seed=42, device="cpu", dtyp
 
 
 if __name__ == "__main__":
-    run_benchmarks(dim=10, steps=250, tol_grad=1e-8, seed=42, device="cpu", dtype=torch.float64, out_dir="plots_500steps")
+    run_benchmarks(dim=10, steps=2000, tol_grad=1e-8, seed=42, device="cpu", dtype=torch.float64, out_dir="plots_2000steps")
