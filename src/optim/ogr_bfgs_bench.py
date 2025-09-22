@@ -1,20 +1,19 @@
 from __future__ import annotations
-import math
-import time
-from dataclasses import dataclass
-from typing import Callable, Dict, Tuple, List, Optional
 
+import itertools
+import math
+import os
+import time
+import traceback
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from torch import Tensor
 
-import itertools
-import os
-import numpy as np
-
-import matplotlib.pyplot as plt
-
 from src.optim.linesearch import Linesearch
-
 
 try:
     from .OGR import OGR
@@ -168,6 +167,7 @@ class RunCfg:
     )  # float64 znacznie stabilniejsze dla (quasi-)Newton
     is_linesearch: bool = False
     print_trace: bool = False
+    print_hessian: bool = False
 
 
 @dataclass
@@ -177,9 +177,28 @@ class Result:
     iters: int = -1
     time_s: float = -1
     points: List[Tensor] = None
+    hessian_real: list[Tensor] = None
+    hessian_est: list[Tensor] = None
+    hessian_inv_est: list[Tensor] = None
 
     def __lt__(self, other: "Result") -> bool:
         return self.best_f < other.best_f
+
+
+def get_bp_hessian_from_loss(loss, params):
+    grads = torch.autograd.grad(loss, params, create_graph=True)
+    grad_flat = torch.cat([g.flatten() for g in grads])
+    n = grad_flat.numel()
+
+    H_rows = []
+    for i in range(n):
+        g2 = torch.autograd.grad(
+            grad_flat[i], params, retain_graph=True, create_graph=True
+        )
+        g2_flat = torch.cat([g.flatten() for g in g2])
+        H_rows.append(g2_flat)
+
+    return torch.stack(H_rows)
 
 
 def minimize_with_ogr(
@@ -232,7 +251,11 @@ def _minimize_with_opt(
     best_f = math.inf
     best_x = x.detach().clone()
     it = 0
+
     points = [x.detach().clone()]
+    real_hessians = []
+    est_hessians = [opt.get_H()]
+    est_inv_hessians = [opt.get_H_inv()]
 
     for it in range(1, steps + 1):
         opt.zero_grad(set_to_none=True)
@@ -241,9 +264,16 @@ def _minimize_with_opt(
         f.backward()
         opt.step()
 
+        # after step optain real gradient
+        opt.zero_grad(set_to_none=True)
+        f = fn(x)
+        real_hessians.append(get_bp_hessian_from_loss(f, [x]))
+
         clamp_inplace(x, bounds)  # BOXING
 
         points.append(x.detach().clone())
+        est_hessians.append(opt.get_H())
+        est_inv_hessians.append(opt.get_H_inv())
 
         gnorm = x.grad.detach().norm().item() if x.grad is not None else float("inf")
         if f.item() < best_f:
@@ -252,7 +282,16 @@ def _minimize_with_opt(
         if gnorm < tol_grad:
             break
 
-    return Result(best_f, best_x, it, time.time() - t0, points)
+    return Result(
+        best_f,
+        best_x,
+        it,
+        time.time() - t0,
+        points=points,
+        hessian_real=real_hessians,
+        hessian_est=est_hessians,
+        hessian_inv_est=est_inv_hessians,
+    )
 
 
 def minimize(
@@ -284,6 +323,79 @@ def minimize(
 
 
 TRACES_PATH = os.path.join(PLOT_PATH, "traces")
+HESSIAN_PATH = os.path.join(PLOT_PATH, "hess")
+
+
+def print_hessian_in_time(
+    real_hessian: list[Tensor],
+    est_hessian: list[Tensor],
+    method_name: str,
+    name: str,
+):
+    def clear_nones(list_of_tensors: list[Tensor]):
+        i = 0
+        while not torch.is_tensor(list_of_tensors[i]):
+            if i >= len(list_of_tensors):
+                raise Exception("None of hessians is tensor")
+            i += 1
+
+        ref = list_of_tensors[i]
+
+        for i in range(len(list_of_tensors)):
+            if not torch.is_tensor(list_of_tensors[i]):
+                list_of_tensors[i] = torch.eye(ref.shape[0])
+
+        return list_of_tensors
+
+    # to numpy
+    real_hessian = torch.stack(clear_nones(real_hessian)).detach().numpy()
+    est_hessian = torch.stack(clear_nones(est_hessian)).detach().numpy()
+
+    n = real_hessian.shape[1]
+
+    fig, axes = plt.subplots(n, n, figsize=(10, 8))
+
+    for i, j in itertools.product(range(n), range(n)):
+        ax = axes[i, j]
+
+        ax.plot(real_hessian[:, i, j], label="Real", color="blue")
+        ax.plot(est_hessian[:, i, j], label=method_name, color="red")
+
+        ax.set_title(f"Hessian coefficient ({i}, {j})")
+
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Value")
+
+        ax.legend()
+
+    fig.suptitle("Hessian coefficents throughout training", fontsize=16)
+    plt.tight_layout()
+
+    plt.savefig(os.path.join(HESSIAN_PATH, name + method_name))
+    plt.close()
+
+
+def print_hessians_from_result(
+    result: Result,
+    name: str,
+    method_name: str,
+):
+    try:
+        print_hessian_in_time(
+            real_hessian=result.hessian_real,
+            est_hessian=result.hessian_est,
+            method_name=method_name,
+            name=name,
+        )
+        print_hessian_in_time(
+            real_hessian=[torch.inverse(h) for h in result.hessian_real],
+            est_hessian=result.hessian_inv_est,
+            method_name=method_name,
+            name="inversion" + name,
+        )
+    except Exception as e:
+        print(f"Didn't print hessian {name} {method_name}, because {str(e)}")
+        traceback.print_exc()
 
 
 def print_optimization_path(
@@ -391,7 +503,12 @@ def run_suite(cfg: RunCfg, names: Optional[List[str]] = None) -> None:
                 )
             except Exception as e:
                 print(f"didnt print trace because {str(e)}")
-
+        if cfg.print_hessian:
+            print_hessians_from_result(
+                result=best_ogr_res,
+                name=name,
+                method_name="OGR",
+            )
         # BFGS optmization
         best_bfgs_res = Result()
 
@@ -420,6 +537,13 @@ def run_suite(cfg: RunCfg, names: Optional[List[str]] = None) -> None:
             except Exception as e:
                 print(f"didnt print trace because {str(e)}")
 
+        if cfg.print_hessian:
+            print_hessians_from_result(
+                result=best_bfgs_res,
+                name=name,
+                method_name="BFGS",
+            )
+
 
 if __name__ == "__main__":
     CONFIG = RunCfg(
@@ -431,6 +555,7 @@ if __name__ == "__main__":
         device="cpu",
         dtype=torch.float64,
         is_linesearch=False,
-        print_trace=True,
+        print_trace=False,
+        print_hessian=True,
     )
     run_suite(CONFIG)

@@ -3,7 +3,7 @@ OGR optimizer (stabilized)
 Paper: https://arxiv.org/pdf/1901.11457
 """
 
-from typing import Union, Optional, List, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -11,9 +11,9 @@ from torch.optim import Optimizer
 from torch.optim.optimizer import ParamsT, _use_grad_for_differentiable
 
 try:
-    from .utils import restore_tensor_list, flat_tensor_list  # package-style
+    from .utils import flat_tensor_list, restore_tensor_list  # package-style
 except Exception:
-    from utils import restore_tensor_list, flat_tensor_list  # local fallback
+    from utils import flat_tensor_list, restore_tensor_list  # local fallback
 
 from .linesearch import Linesearch
 
@@ -101,6 +101,8 @@ class OGR(Optimizer):
             "neg_clip_val": neg_clip_val,
             "max_step_norm": max_step_norm,
         }
+        self.params_size = sum([param.numel() for param in params])
+
         super().__init__(params, defaults)
 
     def _init_group(self, group):
@@ -155,6 +157,10 @@ class OGR(Optimizer):
 
     def get_H(self):
         g = self.param_groups[0]
+
+        if "first_time" not in g:
+            return torch.eye(self.params_size)
+
         return _get_hessian(
             g["mean_params"],
             g["mean_grads"],
@@ -325,13 +331,13 @@ def ogr(
 
     H_inv = _get_H_inv_regular(H, clip_eigh=clip_eigen, eps=eps)
 
-    update_values = - (H_inv @ grads_flat)
+    update_values = -(H_inv @ grads_flat)
 
     # perform linesearch
     if linesearch is not None:
         update_value = linesearch.perform_search(params_flat, update_values)
-    else: 
-        update_values *= lr 
+    else:
+        update_values *= lr
 
     # if max_step_norm is not None:
     #     step_norm = update_values.norm()

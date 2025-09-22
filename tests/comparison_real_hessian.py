@@ -1,16 +1,18 @@
-import torch
-from torch import Tensor
-import torch.nn.functional as F
-from torch.autograd import grad
 from typing import Tuple
+
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import torch.nn.functional as F
 import torch.nn.init as init
+from torch import Tensor
+from torch.autograd import grad
 
 from src.optim.dOGR import dOGR
-from .nets import get_mini_FC, get_FC
+
 from .datamodule import MNISTDataModule
 from .main import run
+from .nets import get_FC, get_mini_FC
 
 
 def get_dogr_hessian(optim: dOGR):
@@ -51,11 +53,9 @@ def get_bp_hessian(grads, params):
 
         for i in range(param.numel()):
             g = grad(outputs=grd.flatten()[i], inputs=param, create_graph=True)[
-                    0
-                ].flatten()
-            snd_grad.append(
-                g[i]
-            )
+                0
+            ].flatten()
+            snd_grad.append(g[i])
         Hs.append(torch.stack(snd_grad).reshape_as(param))
     return Hs
 
@@ -206,7 +206,7 @@ def one_parameter_plot(
         original_value, grad_value, color="green", zorder=5, label="derivative value"
     )
     plt.scatter(
-        - mean_grad_value / est_hs + original_value,
+        -mean_grad_value / est_hs + original_value,
         0,
         marker="x",
         color="green",
@@ -368,8 +368,8 @@ def test2():
                         .item(),
                     )
                 )
-            
-            if i == N - 1: 
+
+            if i == N - 1:
                 break
 
             optim.step()
@@ -403,7 +403,7 @@ def test3():
         ("3.weight", (9, 9)),
         ("7.weight", (9, 9)),
     ]
-    
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}")
 
@@ -430,7 +430,7 @@ def test3():
             optim.zero_grad()
             outputs = net(x)
             loss = loss_fn(outputs, y)
-            
+
             if i == N_steps - 1:
                 loss.backward(retain_graph=True)
             else:
@@ -441,20 +441,24 @@ def test3():
                     param_name, param_index = param_tuple
                     additional_points_to_plot[(param_tuple)].append(
                         (
-                            dict(net.named_parameters())[param_name][param_index].item(),
+                            dict(net.named_parameters())[param_name][
+                                param_index
+                            ].item(),
                             loss.item(),
                         )
                     )
                     additional_grads_points[(param_tuple)].append(
                         (
-                            dict(net.named_parameters())[param_name][param_index].item(),
+                            dict(net.named_parameters())[param_name][
+                                param_index
+                            ].item(),
                             dict(net.named_parameters())[param_name]
                             .grad[param_index]
                             .item(),
                         )
                     )
 
-            if i == N_steps - 1: 
+            if i == N_steps - 1:
                 break
 
             optim.step()
