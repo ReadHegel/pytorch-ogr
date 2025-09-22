@@ -308,6 +308,43 @@ def run_benchmarks(dim=2, steps=2000, tol_grad=1e-8, seed=42, device="cpu", dtyp
 
     return results_all
 
+def plot_generic_distribution(restarts=200, seed=42, out_dir="plots_starts"):
+    torch.manual_seed(seed)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # zawsze bierzemy przykładowe bounds np. (-1, 1) tylko po to, żeby wylosować punkty
+    bounds = ((-1.0, 1.0), (-1.0, 1.0))
+    device, dtype = "cpu", torch.float64
+
+    xs, ys = [], []
+    for i in range(restarts):
+        x0 = sample_uniform(bounds, torch.device(device), dtype, seed=seed + i)
+        xs.append(x0[0].item())
+        ys.append(x0[1].item())
+
+    plt.figure(figsize=(5, 5))
+    plt.scatter(xs, ys, s=25, alpha=0.6, edgecolors="k")
+    plt.title("Generic start distribution (uniform in bounds)")
+
+    # zamiast wartości na osiach wpisujemy "bounds"
+    plt.xlabel("bounds")
+    plt.ylabel("bounds")
+
+    # zakres zawsze -1..1 tylko jako przykład prostokąta
+    plt.xlim(bounds[0][0], bounds[0][1])
+    plt.ylim(bounds[1][0], bounds[1][1])
+
+    plt.grid(True, alpha=0.3)
+    fname = os.path.join(out_dir, f"generic_distribution.png")
+    plt.savefig(fname)
+    plt.close()
+    print(f"✅ Saved generic distribution to {fname}")
+
+
+
+
 
 if __name__ == "__main__":
-    run_benchmarks(dim=10, steps=2000, tol_grad=1e-8, seed=42, device="cpu", dtype=torch.float64, out_dir="plots_2000steps")
+    plot_generic_distribution()
+
+    # run_benchmarks(dim=10, steps=2000, tol_grad=1e-8, seed=42, device="cpu", dtype=torch.float64, out_dir="plots_2000steps")
