@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run src.optim.ogr_bfgs_bench",
+      "type": "python",
+      "request": "launch",
+      "module": "src.optim.ogr_bfgs_bench",
+      "args": ["-m"],
+      "justMyCode": false
+    }
+  ]
+}

@@ -43,7 +43,8 @@ def _get_hessian(
     A = d_params_param
     B = d_grads_param + d_grads_param.T
 
-    L, O = torch.linalg.eigh(A)
+    jitter = torch.eye(A.shape[0], device=A.device, dtype=A.dtype) * eps
+    L, O = torch.linalg.eigh(A + jitter)
 
     Li = L.unsqueeze(0).expand(size, size)
     Lj = L.unsqueeze(1).expand(size, size)
@@ -63,6 +64,8 @@ def _get_H_inv_regular(H: Tensor, clip_eigh: Optional[float], eps: float) -> Ten
     L_abs = L.abs()
     if clip_eigh is not None:
         L_abs = torch.maximum(torch.ones_like(L_abs) * clip_eigh, L_abs)
+    else: 
+        pass
 
     inv_diag = 1.0 / L_abs
     H_inv = Q @ torch.diag(inv_diag) @ Q.T
@@ -74,7 +77,7 @@ class OGR(Optimizer):
         self,
         params: ParamsT,
         lr: Union[float, Tensor] = (1 / 1.5),
-        clip_eigen: Optional[float] = None,
+        clip_eigen: Optional[float] = 1e-12,
         beta: float = 0.30,
         eps: float = 1e-12,
         linesearch: Linesearch = None,
@@ -171,7 +174,12 @@ class OGR(Optimizer):
         )
 
     def get_H_inv(self):
-        return torch.inverse(self.get_H())
+        H = self.get_H()
+        try:  
+            return torch.inverse(H)
+        except: 
+            return torch.eye(H.shape[0])
+
 
     @_use_grad_for_differentiable
     def step(self, closure=None) -> Union[None, float]:
