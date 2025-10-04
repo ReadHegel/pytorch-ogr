@@ -487,7 +487,7 @@ def run_suite(cfg: RunCfg, names: Optional[List[str]] = None) -> None:
                 best_ogr_res = min(best_ogr_res, res)
             except Exception as e:
                 ogr_err = str(e)
-            traceback.print_exc()
+                traceback.print_exc()
                 break
         if ogr_err is None:
             print(f"Best OGR   : {best_ogr_res.best_f:.6e}")
@@ -550,7 +550,7 @@ if __name__ == "__main__":
     CONFIG = RunCfg(
         dim=2,
         restarts=10,
-        steps=20,
+        steps=100,
         tol_grad=1e-8,
         seed=42,
         device="cpu",
