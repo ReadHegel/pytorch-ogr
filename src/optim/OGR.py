@@ -46,12 +46,14 @@ def _get_hessian(
     jitter = torch.eye(A.shape[0], device=A.device, dtype=A.dtype) * eps
     L, O = torch.linalg.eigh(A + jitter)
 
+    alpha = torch.as_tensor(max(eps, 1e-12), dtype=L.dtype, device=L.device)
     Li = L.unsqueeze(0).expand(size, size)
     Lj = L.unsqueeze(1).expand(size, size)
     denom = Li + Lj
 
-    if (denom == 0).any():
-        raise RuntimeError("Zero eighen value in covariant matrix")
+    # if (denom == 0).any():
+    #     raise RuntimeError("Zero eighen value in covariant matrix")
+    denom_safe = torch.where(denom.abs() < alpha, alpha, denom)
 
     BO = O.T @ B @ O
     H = O @ (BO / denom) @ O.T
@@ -62,10 +64,14 @@ def _get_H_inv_regular(H: Tensor, clip_eigh: Optional[float], eps: float) -> Ten
     L, Q = torch.linalg.eigh(H)
 
     L_abs = L.abs()
+    alpha = torch.as_tensor(max(eps, 1e-12), dtype=L_abs.dtype, device=L_abs.device)
     if clip_eigh is not None:
-        L_abs = torch.maximum(torch.ones_like(L_abs) * clip_eigh, L_abs)
+        floor = torch.as_tensor(clip_eigh, dtype=L_abs.dtype, device=L_abs.device)
+        L_safe = torch.maximum(L_abs, floor)
+    else:
+        L_safe = torch.maximum(L_abs, alpha)
 
-    inv_diag = 1.0 / L_abs
+    inv_diag = 1.0 / L_safe
     H_inv = Q @ torch.diag(inv_diag) @ Q.T
     return 0.5 * (H_inv + H_inv.T)
 
