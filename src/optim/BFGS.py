@@ -123,7 +123,7 @@ class BFGS(Optimizer):
             direction = - (group["H_inv"] @ flat_grad)
             
             if self.linesearch is not None: 
-                direction = self.linesearch.perform_search(p_flat, direction)
+                direction = self.linesearch.perform_search(p_flat, direction, flat_grad)
             else: 
                 direction *= lr
 
