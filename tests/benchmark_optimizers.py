@@ -1,86 +1,69 @@
 from __future__ import annotations
+
 import math
 import time
+import traceback
 from dataclasses import dataclass
-from typing import Callable, Dict, Tuple, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor
 
+from src.optim.BFGS import BFGS
 from src.optim.linesearch import Linesearch
-import os
+from src.optim.OGR import OGR
 
-
-try:
-    from src.optim.OGR import OGR
-except Exception:
-    from OGR import OGR
-
-try:
-    from src.optim.BFGS import BFGS
-except Exception:
-    from BFGS import BFGS
-
-import matplotlib.pyplot as plt
+from .benchmark_functions import (
+    ackley,
+    beale,
+    griewank,
+    himmelblau,
+    rastrigin,
+    rosenbrock,
+    schwefel,
+    sphere,
+    zakharov,
+)
+from .plot_functions import HessianPlot, InvHessianPlot, Plot, PlotList, TracePlot
+from .utils import (
+    clamp_inplace,
+    get_bp_hessian_from_loss,
+    repeat_bounds,
+    sample_uniform,
+)
 
 SEED = 42
 
 
-# ===== Test functions (x: 1-D tensor) =====
-def sphere(x: Tensor) -> Tensor:
-    return (x * x).sum()
+@dataclass
+class RunCfg:
+    dim: int = 2
+    restarts: int = 10
+    steps: int = 100
+    tol_grad: float = 1e-8
+    seed: int = SEED
+    device: str = "cpu"
+    dtype: torch.dtype = (
+        torch.float64
+    )  # float64 znacznie stabilniejsze dla (quasi-)Newton
+    is_linesearch: bool = False
+    print_trace: bool = False
+    print_hessian: bool = False
 
 
-def rosenbrock(x: Tensor, a: float = 1.0, b: float = 100.0) -> Tensor:
-    return (b * (x[1:] - x[:-1] ** 2) ** 2 + (a - x[:-1]) ** 2).sum()
+@dataclass
+class Result:
+    best_f: float = math.inf
+    best_x: Tensor = torch.tensor([])
+    iters: int = -1
+    time_s: float = -1
+    points: List[Tensor] = None
+    hessian_real: list[Tensor] = None
+    hessian_est: list[Tensor] = None
+    hessian_inv_est: list[Tensor] = None
 
-
-def rastrigin(x: Tensor, A: float = 10.0) -> Tensor:
-    n = x.numel()
-    return A * n + (x * x - A * torch.cos(2 * math.pi * x)).sum()
-
-
-def ackley(x: Tensor) -> Tensor:
-    n = x.numel()
-    s1 = torch.sqrt((x * x).sum() / n)
-    s2 = torch.cos(2 * math.pi * x).sum() / n
-    return -20.0 * torch.exp(-0.2 * s1) - torch.exp(s2) + 20.0 + math.e
-
-
-def griewank(x: Tensor) -> Tensor:
-    n = x.numel()
-    sum_term = (x * x).sum() / 4000.0
-    i = torch.arange(1, n + 1, device=x.device, dtype=x.dtype)
-    prod_term = torch.cos(x / torch.sqrt(i)).prod()
-    return sum_term - prod_term + 1.0
-
-
-def schwefel(x: Tensor) -> Tensor:
-    return 418.9829 * x.numel() - (x * torch.sin(torch.sqrt(torch.abs(x)))).sum()
-
-
-def zakharov(x: Tensor) -> Tensor:
-    i = torch.arange(1, x.numel() + 1, device=x.device, dtype=x.dtype)
-    term1 = (x * x).sum()
-    term2 = (0.5 * i * x).sum()
-    return term1 + term2**2 + term2**4
-
-
-# 2D only
-def himmelblau(x: Tensor) -> Tensor:
-    assert x.numel() == 2
-    X, Y = x[0], x[1]
-    return (X * X + Y - 11) ** 2 + (X + Y * Y - 7) ** 2
-
-
-def beale(x: Tensor) -> Tensor:
-    assert x.numel() == 2
-    X, Y = x[0], x[1]
-    return (
-        (1.5 - X + X * Y) ** 2
-        + (2.25 - X + X * Y**2) ** 2
-        + (2.625 - X + X * Y**3) ** 2
-    )
+    def __lt__(self, other: "Result") -> bool:
+        return self.best_f < other.best_f
 
 
 # ===== Registry (bounds + meta) =====
@@ -90,10 +73,6 @@ class FunMeta:
     bounds: Tuple[Tuple[float, float], ...]
     global_min_f: float
     name: str
-
-
-def repeat_bounds(b: Tuple[float, float], n: int):
-    return tuple([b] * n)
 
 
 REG_ALL: Dict[str, FunMeta] = {
@@ -121,58 +100,6 @@ OGR_SETTINGS = {
 }
 
 
-def sample_uniform(
-    bounds: Tuple[Tuple[float, float], ...],
-    device: torch.device,
-    dtype: torch.dtype,
-    seed=None,
-) -> Tensor:
-    lows = torch.tensor([b[0] for b in bounds], device=device, dtype=dtype)
-    highs = torch.tensor([b[1] for b in bounds], device=device, dtype=dtype)
-
-    generator = torch.Generator(device=device)
-    if seed is not None:
-        generator.manual_seed(seed)
-
-    u = torch.rand(
-        lows.size(),
-        dtype=lows.dtype,
-        layout=lows.layout,
-        device=lows.device,
-        generator=generator,
-    )
-    return lows + u * (highs - lows)
-
-
-def clamp_inplace(x: Tensor, bounds: Tuple[Tuple[float, float], ...]) -> None:
-    """Project x back into box bounds (in-place)."""
-    lows = torch.tensor([b[0] for b in bounds], device=x.device, dtype=x.dtype)
-    highs = torch.tensor([b[1] for b in bounds], device=x.device, dtype=x.dtype)
-    x.data.copy_(torch.minimum(torch.maximum(x.data, lows), highs))
-
-
-@dataclass
-class RunCfg:
-    dim: int = 2
-    restarts: int = 8
-    steps: int = 1000
-    tol_grad: float = 1e-9
-    seed: int = 123
-    device: str = "cpu"
-    dtype: torch.dtype = (
-        torch.float64
-    )  # float64 znacznie stabilniejsze dla (quasi-)Newton
-    is_linesearch: bool = False
-
-
-@dataclass
-class Result:
-    best_f: float
-    best_x: Tensor
-    iters: int
-    time_s: float
-
-
 def minimize_with_ogr(
     fn: Callable[[Tensor], Tensor],
     x0: Tensor,
@@ -181,170 +108,260 @@ def minimize_with_ogr(
     bounds: Tuple[Tuple[float, float], ...],
     ogr_cfg: Dict[str, float],
 ) -> Result:
-    x = x0.clone().detach().requires_grad_(True)
-    opt = OGR(
-        [x],
-        lr=ogr_cfg.get("lr", 0.5),
-        beta=ogr_cfg.get("beta", 0.2),
-        eps=1e-12,
-        linesearch=ogr_cfg["linesearch"],
-        maximize=False,
-        max_step_norm=ogr_cfg.get("max_step_norm", 1.0),
+    return minimize(
+        fn,
+        x0,
+        steps=steps,
+        tol_grad=tol_grad,
+        bounds=bounds,
+        cfg=ogr_cfg,
+        opt_class=OGR,
     )
-    t0 = time.time()
-    best_f = math.inf
-    best_x = x.detach().clone()
-    for it in range(1, steps + 1):
-        opt.zero_grad(set_to_none=True)
-        f = fn(x)
-        f.backward()
-        opt.step()
-        clamp_inplace(x, bounds)  # BOXING
-        gnorm = x.grad.detach().norm().item() if x.grad is not None else float("inf")
-        if f.item() < best_f:
-            best_f = float(f.item())
-            best_x = x.detach().clone()
-        if gnorm < tol_grad:
-            break
-    return Result(best_f, best_x, it, time.time() - t0)
 
 
 def minimize_with_bfgs(
     fn: Callable[[Tensor], Tensor],
     x0: Tensor,
-    lr: float,
     steps: int,
     tol_grad: float,
     bounds: Tuple[Tuple[float, float], ...],
     bfgs_cfg: Dict = {},
 ) -> Result:
-    x = x0.clone().detach().requires_grad_(True)
-    opt = BFGS([x], lr=lr, linesearch=bfgs_cfg["linesearch"])
+    return minimize(
+        fn,
+        x0,
+        steps=steps,
+        tol_grad=tol_grad,
+        bounds=bounds,
+        cfg=bfgs_cfg,
+        opt_class=BFGS,
+    )
+
+
+def _minimize_with_opt(
+    fn: Callable[[Tensor], Tensor],
+    x: Tensor,
+    opt,
+    steps: int,
+    tol_grad: float,
+    bounds: Tuple[Tuple[float, float], ...],
+):
     t0 = time.time()
     best_f = math.inf
     best_x = x.detach().clone()
     it = 0
+
+    points = [x.detach().clone()]
+    real_hessians = []
+    est_hessians = [opt.get_H()]
+    est_inv_hessians = [opt.get_H_inv()]
+
     for it in range(1, steps + 1):
         opt.zero_grad(set_to_none=True)
+
         f = fn(x)
         f.backward()
         opt.step()
+
+        # after step optain real gradient
+        opt.zero_grad(set_to_none=True)
+        f = fn(x)
+        real_hessians.append(get_bp_hessian_from_loss(f, [x]))
+
         clamp_inplace(x, bounds)  # BOXING
+
+        points.append(x.detach().clone())
+        est_hessians.append(opt.get_H())
+        est_inv_hessians.append(opt.get_H_inv())
+
         gnorm = x.grad.detach().norm().item() if x.grad is not None else float("inf")
+
         if f.item() < best_f:
             best_f = float(f.item())
             best_x = x.detach().clone()
         if gnorm < tol_grad:
             break
-    return Result(best_f, best_x, it, time.time() - t0)
+
+    return Result(
+        best_f,
+        best_x,
+        it,
+        time.time() - t0,
+        points=points,
+        hessian_real=real_hessians,
+        hessian_est=est_hessians,
+        hessian_inv_est=est_inv_hessians,
+    )
 
 
+def minimize(
+    fn: Callable[[Tensor], Tensor],
+    x0: Tensor,
+    steps: int,
+    tol_grad: float,
+    bounds: Tuple[Tuple[float, float], ...],
+    cfg: Dict,
+    opt_class,
+):
+    x = x0.clone().detach().requires_grad_(True)
+    if opt_class == OGR:
+        opt = OGR(
+            [x],
+            lr=cfg.get("lr", 0.5),
+            beta=cfg.get("beta", 0.2),
+            eps=1e-12,
+            linesearch=cfg["linesearch"],
+            maximize=False,
+            max_step_norm=cfg.get("max_step_norm", 1.0),
+        )
+    else:
+        opt = BFGS([x], lr=cfg["lr"], linesearch=cfg["linesearch"])
 
-def run_benchmarks(dim=2, steps=2000, tol_grad=1e-8, seed=42, device="cpu", dtype=torch.float64, out_dir="plots"):
-    torch.manual_seed(seed)
-    device = torch.device(device)
-    os.makedirs(out_dir, exist_ok=True)
+    return _minimize_with_opt(
+        fn=fn, x=x, opt=opt, steps=steps, tol_grad=tol_grad, bounds=bounds
+    )
 
-    results_all = {}
 
-    for name, meta in REG_ALL.items():
-        print(f"\n>>> Running benchmarks for {meta.name} ({name})")
-        if len(meta.bounds) == 2 and dim != 2 and name not in ("himmelblau", "beale"):
-            bounds = tuple([meta.bounds[0]] * dim)
+def perform_multiround_optimization(
+    method_name: str,
+    experiment_name: str,
+    plot_list: PlotList,
+    local_restarts: int,
+    bounds,
+    device,
+    dtype,
+    wrap_fn,
+    local_steps,
+    tol_grad,
+    cfg,
+):
+    best_res = Result()
+    err = None
+
+    minimize_f = None
+    if method_name == "OGR":
+        minimize_f = minimize_with_ogr
+    elif method_name == "BFGS":
+        minimize_f = minimize_with_bfgs
+    else:
+        raise RuntimeError(f"No such method as: {method_name}")
+
+    for i in range(local_restarts):
+        x0 = sample_uniform(bounds, device, dtype, seed=SEED + i)
+        try:
+            res = minimize_with_ogr(wrap_fn, x0, local_steps, tol_grad, bounds, cfg)
+            best_res = min(best_res, res)
+        except Exception as e:
+            err = str(e)
+            traceback.print_exc()
+            break
+
+    if err is None:
+        print(f"Best {method_name}   : {best_res.best_f:.6e}")
+    else:
+        print(f"Best {method_name}   : ERROR ({err})")
+
+    best_res.experiment_name = method_name + " " + experiment_name
+    best_res.optimized_function = wrap_fn
+
+    plot_list.print(best_res)
+
+    return best_res
+
+
+def run(cfg: RunCfg, plot_list: PlotList) -> None:
+    device = torch.device(cfg.device)
+    dtype = cfg.dtype
+
+    print(f"Running on: {device}, dtype={dtype}\n")
+    print(
+        f"""Dimensions: {cfg.dim},
+        Restarts: {cfg.restarts},
+        Steps: {cfg.steps},
+        tol_grad: {cfg.tol_grad}\n"""
+    )
+
+    for name in list(REG_ALL.keys()):
+        meta = REG_ALL[name]
+        if (
+            len(meta.bounds) == 2
+            and cfg.dim != 2
+            and name not in ("himmelblau", "beale")
+        ):
+            bounds = repeat_bounds(meta.bounds[0], cfg.dim)
         else:
             bounds = meta.bounds
 
         def wrap_fn(z: Tensor) -> Tensor:
             return meta.fn(z)
 
+        linesearch = Linesearch(wrap_fn) if cfg.is_linesearch else None
+
+        print(f"=== {meta.name} ({name}) ===")
+
         ogr_cfg = OGR_SETTINGS.get(name, dict(lr=0.5, beta=0.2, max_step_norm=1.0))
-        ogr_cfg_base = dict(ogr_cfg)
+        bfgs_cfg = {}
 
-        losses = {"OGR": [], "OGR+LS": [], "BFGS": [], "BFGS+LS": []}
+        ogr_cfg["linesearch"] = linesearch
+        bfgs_cfg["linesearch"] = linesearch
+        bfgs_cfg["lr"] = ogr_cfg["lr"]
 
-        for i in range(200):
-            if i % 50 == 0 and i > 0:
-                print(f"  Processed {i}/200 restarts...")
-            x0 = sample_uniform(bounds, device, dtype, seed=seed + i)
+        local_restarts = 30 if name == "schwefel" else cfg.restarts
+        local_steps = 2000 if name == "schwefel" else cfg.steps
 
-            # OGR
-            r = minimize_with_ogr(wrap_fn, x0, steps, tol_grad, bounds, {**ogr_cfg_base, "linesearch": None})
-            losses["OGR"].append(r.best_f)
+        best_ogr_res = perform_multiround_optimization(
+            method_name="OGR",
+            experiment_name=f"opt of {name} function",
+            plot_list=plot_list,
+            local_restarts=local_restarts,
+            bounds=bounds,
+            dtype=dtype,
+            wrap_fn=wrap_fn,
+            local_steps=local_steps,
+            tol_grad=cfg.tol_grad,
+            cfg=ogr_cfg,
+        )
 
-            # OGR + line search
-            r = minimize_with_ogr(wrap_fn, x0, steps, tol_grad, bounds, {**ogr_cfg_base, "linesearch": Linesearch(wrap_fn)})
-            losses["OGR+LS"].append(r.best_f)
+        print(f"Best OGR  : {best_ogr_res.best_f:.6e}")
+        print(f"Target f*  : {meta.global_min_f:.6e}\n")
 
-            # BFGS
-            r = minimize_with_bfgs(wrap_fn, x0, ogr_cfg_base["lr"], steps, tol_grad, bounds, {"linesearch": None})
-            losses["BFGS"].append(r.best_f)
+        best_bfgs_res = perform_multiround_optimization(
+            method_name="BFGS",
+            experiment_name=f"opt of {name} function",
+            plot_list=plot_list,
+            local_restarts=local_restarts,
+            bounds=bounds,
+            dtype=dtype,
+            wrap_fn=wrap_fn,
+            local_steps=local_steps,
+            tol_grad=cfg.tol_grad,
+            cfg=bfgs_cfg,
+        )
 
-            # BFGS + line search
-            r = minimize_with_bfgs(wrap_fn, x0, ogr_cfg_base["lr"], steps, tol_grad, bounds, {"linesearch": Linesearch(wrap_fn)})
-            losses["BFGS+LS"].append(r.best_f)
-
-        # sort each optimizer’s losses
-        for k in losses:
-            losses[k] = sorted(losses[k])
-
-        results_all[name] = (meta, losses)
-        print(f"  Finished {meta.name}, best results: OGR={min(losses['OGR']):.2e}, BFGS={min(losses['BFGS']):.2e}")
-
-        # Save plot immediately after each function
-        plt.figure(figsize=(10, 6))
-        for method, vals in losses.items():
-            plt.scatter(range(1, len(vals) + 1), vals, label=method, s=15)
-        plt.title(f"{meta.name} ({name})")
-        plt.xlabel("Start point index (sorted)")
-        plt.ylabel("Loss (log scale)")
-        plt.yscale("log")
-        plt.legend()
-        plt.grid(True, which="both", alpha=0.3)
-        plt.tight_layout()
-        fname = os.path.join(out_dir, f"{name}.png")
-        plt.savefig(fname)
-        plt.close()
-        print(f"  Saved plot to {fname}")
-
-    return results_all
-
-def plot_generic_distribution(restarts=200, seed=42, out_dir="plots_starts"):
-    torch.manual_seed(seed)
-    os.makedirs(out_dir, exist_ok=True)
-
-    # zawsze bierzemy przykładowe bounds np. (-1, 1) tylko po to, żeby wylosować punkty
-    bounds = ((-1.0, 1.0), (-1.0, 1.0))
-    device, dtype = "cpu", torch.float64
-
-    xs, ys = [], []
-    for i in range(restarts):
-        x0 = sample_uniform(bounds, torch.device(device), dtype, seed=seed + i)
-        xs.append(x0[0].item())
-        ys.append(x0[1].item())
-
-    plt.figure(figsize=(5, 5))
-    plt.scatter(xs, ys, s=25, alpha=0.6, edgecolors="k")
-    plt.title("Generic start distribution (uniform in bounds)")
-
-    # zamiast wartości na osiach wpisujemy "bounds"
-    plt.xlabel("bounds")
-    plt.ylabel("bounds")
-
-    # zakres zawsze -1..1 tylko jako przykład prostokąta
-    plt.xlim(bounds[0][0], bounds[0][1])
-    plt.ylim(bounds[1][0], bounds[1][1])
-
-    plt.grid(True, alpha=0.3)
-    fname = os.path.join(out_dir, f"generic_distribution.png")
-    plt.savefig(fname)
-    plt.close()
-    print(f"✅ Saved generic distribution to {fname}")
+        print(f"Best BFGS  : {best_bfgs_res.best_f:.6e}")
+        print(f"Target f*  : {meta.global_min_f:.6e}\n")
 
 
+def setup_plots(config: RunCfg):
+    plot_list = []
+    if config.print_trace:
+        plot_list.append(TracePlot)
+    if config.print_hessian:
+        plot_list.append(HessianPlot)
+        plot_list.append(InvHessianPlot)
 
+    return PlotList(plot_list)
+
+
+def main(config: RunCfg):
+    plot_list: PlotList = setup_plots(config)
+    torch.manual_seed(config.seed)
+    run(
+        config,
+        plot_list,
+    )
 
 
 if __name__ == "__main__":
-    plot_generic_distribution()
-
-    # run_benchmarks(dim=10, steps=2000, tol_grad=1e-8, seed=42, device="cpu", dtype=torch.float64, out_dir="plots_2000steps")
+    CONFIG = RunCfg()
+    main(CONFIG)
