@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 
+import math
 
 # ===== Test functions (x: 1-D tensor) =====
 def sphere(x: Tensor) -> Tensor:

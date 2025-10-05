@@ -12,11 +12,11 @@ PLOT_FOLDER = "traces"
 
 class TracePlot(Plot):
     def __init__(self):
-        super.__init__(PLOT_NAME, PLOT_FOLDER)
+        super().__init__(PLOT_NAME, PLOT_FOLDER)
 
     def _inner_print(self, result: Result, name: str):
         self.__print_traces(
-            f=result.f,
+            f=result.optimized_function,
             points=result.points,
             bounds=result.bounds,
             name=name,

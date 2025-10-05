@@ -59,7 +59,7 @@ def print_hessian_in_time(
 
 class HessianPlot(Plot):
     def __init__(self):
-        super.__init__(PLOT_NAME, PLOT_FOLDER)
+        super().__init__(PLOT_NAME, PLOT_FOLDER)
 
     def _inner_print(self, result: Result, name: str):
         print_hessian_in_time(
@@ -71,7 +71,7 @@ class HessianPlot(Plot):
 
 class InvHessianPlot(Plot):
     def __init__(self):
-        super.__init__(INV_PLOT_NAME, PLOT_FOLDER)
+        super().__init__(INV_PLOT_NAME, PLOT_FOLDER)
 
     def _inner_print(self, result: Result, name: str):
         print_hessian_in_time(

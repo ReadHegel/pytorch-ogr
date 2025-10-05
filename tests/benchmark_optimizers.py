@@ -24,7 +24,14 @@ from .benchmark_functions import (
     sphere,
     zakharov,
 )
-from .plot_functions import HessianPlot, InvHessianPlot, Plot, PlotList, TracePlot
+from .plot_functions import (
+    HessianPlot,
+    InvHessianPlot,
+    Plot,
+    PlotList,
+    Result,
+    TracePlot,
+)
 from .utils import (
     clamp_inplace,
     get_bp_hessian_from_loss,
@@ -47,23 +54,8 @@ class RunCfg:
         torch.float64
     )  # float64 znacznie stabilniejsze dla (quasi-)Newton
     is_linesearch: bool = False
-    print_trace: bool = False
-    print_hessian: bool = False
-
-
-@dataclass
-class Result:
-    best_f: float = math.inf
-    best_x: Tensor = torch.tensor([])
-    iters: int = -1
-    time_s: float = -1
-    points: List[Tensor] = None
-    hessian_real: list[Tensor] = None
-    hessian_est: list[Tensor] = None
-    hessian_inv_est: list[Tensor] = None
-
-    def __lt__(self, other: "Result") -> bool:
-        return self.best_f < other.best_f
+    print_trace: bool = True
+    print_hessian: bool = True
 
 
 # ===== Registry (bounds + meta) =====
@@ -218,7 +210,12 @@ def minimize(
         opt = BFGS([x], lr=cfg["lr"], linesearch=cfg["linesearch"])
 
     return _minimize_with_opt(
-        fn=fn, x=x, opt=opt, steps=steps, tol_grad=tol_grad, bounds=bounds
+        fn=fn,
+        x=x,
+        opt=opt,
+        steps=steps,
+        tol_grad=tol_grad,
+        bounds=bounds,
     )
 
 
@@ -249,7 +246,14 @@ def perform_multiround_optimization(
     for i in range(local_restarts):
         x0 = sample_uniform(bounds, device, dtype, seed=SEED + i)
         try:
-            res = minimize_with_ogr(wrap_fn, x0, local_steps, tol_grad, bounds, cfg)
+            res = minimize_f(
+                wrap_fn,
+                x0,
+                local_steps,
+                tol_grad,
+                bounds,
+                cfg,
+            )
             best_res = min(best_res, res)
         except Exception as e:
             err = str(e)
@@ -261,8 +265,10 @@ def perform_multiround_optimization(
     else:
         print(f"Best {method_name}   : ERROR ({err})")
 
+    # Save data for later ploting
     best_res.experiment_name = method_name + " " + experiment_name
     best_res.optimized_function = wrap_fn
+    best_res.bounds = bounds
 
     plot_list.print(best_res)
 
@@ -275,10 +281,12 @@ def run(cfg: RunCfg, plot_list: PlotList) -> None:
 
     print(f"Running on: {device}, dtype={dtype}\n")
     print(
-        f"""Dimensions: {cfg.dim},
-        Restarts: {cfg.restarts},
-        Steps: {cfg.steps},
-        tol_grad: {cfg.tol_grad}\n"""
+        (
+            f"Dimensions: {cfg.dim} "
+            "Restarts: {cfg.restarts} "
+            "Steps: {cfg.steps} "
+            "tol_grad: {cfg.tol_grad}\n "
+        )
     )
 
     for name in list(REG_ALL.keys()):
@@ -316,14 +324,12 @@ def run(cfg: RunCfg, plot_list: PlotList) -> None:
             local_restarts=local_restarts,
             bounds=bounds,
             dtype=dtype,
+            device=device,
             wrap_fn=wrap_fn,
             local_steps=local_steps,
             tol_grad=cfg.tol_grad,
             cfg=ogr_cfg,
         )
-
-        print(f"Best OGR  : {best_ogr_res.best_f:.6e}")
-        print(f"Target f*  : {meta.global_min_f:.6e}\n")
 
         best_bfgs_res = perform_multiround_optimization(
             method_name="BFGS",
@@ -332,23 +338,23 @@ def run(cfg: RunCfg, plot_list: PlotList) -> None:
             local_restarts=local_restarts,
             bounds=bounds,
             dtype=dtype,
+            device=device,
             wrap_fn=wrap_fn,
             local_steps=local_steps,
             tol_grad=cfg.tol_grad,
             cfg=bfgs_cfg,
         )
 
-        print(f"Best BFGS  : {best_bfgs_res.best_f:.6e}")
         print(f"Target f*  : {meta.global_min_f:.6e}\n")
 
 
 def setup_plots(config: RunCfg):
     plot_list = []
     if config.print_trace:
-        plot_list.append(TracePlot)
+        plot_list.append(TracePlot())
     if config.print_hessian:
-        plot_list.append(HessianPlot)
-        plot_list.append(InvHessianPlot)
+        plot_list.append(HessianPlot())
+        plot_list.append(InvHessianPlot())
 
     return PlotList(plot_list)
 

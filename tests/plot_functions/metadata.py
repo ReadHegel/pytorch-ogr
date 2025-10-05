@@ -9,9 +9,6 @@ import torch
 from torch import Tensor
 
 PLOT_PATH = "plots"
-TRACES_PATH = os.path.join(PLOT_PATH, "traces")
-HESSIAN_PATH = os.path.join(PLOT_PATH, "hess")
-
 
 @dataclass
 class Result:
@@ -19,12 +16,17 @@ class Result:
     best_x: Tensor = torch.tensor([])
     iters: int = -1
     time_s: float = -1
+
+    # --- Data for ploting ---
+    experiment_name: str = "[no experiment name provided]"
+
     points: List[Tensor] = None
+    optimized_function = None
+    bounds = None
+
     hessian_real: list[Tensor] = None
     hessian_est: list[Tensor] = None
     hessian_inv_est: list[Tensor] = None
-    experiment_name: str = "[no experiment name provided]"
-    optimized_function = None
 
     def __lt__(self, other: "Result") -> bool:
         return self.best_f < other.best_f
@@ -33,7 +35,7 @@ class Result:
 class Plot:
     def __init__(self, plot_name: str, plot_folder_name: str):
         self.plot_name = plot_name
-        self.plot_folder_name = self.plot_folder_name
+        self.plot_folder_name = plot_folder_name
 
     def print(self, result: Result):
         name = result.experiment_name + "-" + self.plot_name
@@ -44,7 +46,7 @@ class Plot:
             print(f"PRINTING ERROR IN: {name}, ERROR: {str(e)}")
             traceback.print_exc()
 
-        path = os.path.join(HESSIAN_PATH, self.plot_folder_name)
+        path = os.path.join(PLOT_PATH, self.plot_folder_name)
         path = os.path.join(path, name)
 
         plt.savefig(path)

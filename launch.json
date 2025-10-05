@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run benchmark_optimizers",
+            "type": "python",
+            "request": "launch",
+            "module": "tests.benchmark_optimizers",
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        }
+    ]
+}
